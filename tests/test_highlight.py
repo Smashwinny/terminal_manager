@@ -1,13 +1,5 @@
-from terminal_manager.highlight import border_geometries
-from terminal_manager.model import WindowInfo
+from terminal_manager.highlight import flash_geometry
 
 
-def test_border_geometries_surround_window() -> None:
-    window = WindowInfo("0x1", 0, 1, 100, 200, 800, 600, "XTerm.XTerm", "host", "title")
-    assert border_geometries(window, 6) == (
-        "812x6+94+194",
-        "812x6+94+800",
-        "6x600+94+200",
-        "6x600+900+200",
-    )
-    assert border_geometries(window, 6, (20, 30, 400, 300))[0] == "412x6+14+24"
+def test_flash_geometry_covers_window() -> None:
+    assert flash_geometry((100, 200, 800, 600)) == "800x600+100+200"

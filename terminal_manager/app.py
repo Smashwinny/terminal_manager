@@ -399,20 +399,11 @@ class TerminalManagerApp:
         if error:
             self.details.configure(text=error)
         active_item = None
-        active_window = None
         try:
             active_id = active_window_id()
             active_item = item_id_for_window(self.items, active_id)
-            active_window = find_window(active_id, self.windows)
         except (X11Error, ValueError):
             pass
-        if active_window:
-            try:
-                self.window_highlighter.show(active_window, window_geometry(active_window.window_id))
-            except X11Error:
-                self.window_highlighter.hide()
-        else:
-            self.window_highlighter.hide()
         item_to_select = active_item or selected_shell_id
         if item_to_select and self.tree.exists(item_to_select):
             self.tree.selection_set(item_to_select)
@@ -568,12 +559,10 @@ class TerminalManagerApp:
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
             return
-        target_window = find_window(window_id, self.windows)
-        if target_window:
-            try:
-                self.window_highlighter.show(target_window, window_geometry(window_id))
-            except X11Error:
-                self.window_highlighter.hide()
+        try:
+            self.window_highlighter.flash(window_geometry(window_id))
+        except X11Error:
+            self.window_highlighter.hide()
 
     def _apply_focused_shell_highlight(self) -> None:
         for item_id, (shell, window) in self.items.items():
