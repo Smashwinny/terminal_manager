@@ -89,6 +89,7 @@ class TerminalManagerApp:
         self._focus_clear_job: str | None = None
         self._focus_saved_tags: tuple[str, ...] | None = None
         self.refresh_job: str | None = None
+        self.active_poll_job: str | None = None
         self.search_var = tk.StringVar()
         self.thermal_enabled = tk.BooleanVar(value=True)
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -97,8 +98,12 @@ class TerminalManagerApp:
         self.window_highlighter = WindowHighlighter(root)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.refresh()
+        self._poll_active_window()
 
     def _close(self) -> None:
+        if self.active_poll_job is not None:
+            self.root.after_cancel(self.active_poll_job)
+            self.active_poll_job = None
         self.window_highlighter.hide()
         self.root.destroy()
 
@@ -468,30 +473,32 @@ class TerminalManagerApp:
         self._update_metric_cards()
         if error:
             self.details.configure(text=error)
-        active_item = None
-        try:
-            active_id = active_window_id()
-            active_item = item_id_for_window(self.items, active_id)
-            if active_item:
-                if active_item != self._observed_active_item:
-                    self._flash_workspace_item(active_item)
-                self._observed_active_item = active_item
-            else:
-                self._observed_active_item = None
-        except (X11Error, ValueError):
-            pass
         self._apply_focused_shell_highlight()
-        item_to_select = active_item or selected_shell_id
+        item_to_select = selected_shell_id
         if item_to_select and self.tree.exists(item_to_select):
             self.tree.selection_set(item_to_select)
             self.tree.focus(item_to_select)
-            if active_item:
-                self.tree.see(item_to_select)
         if self.focused_item_id is None:
             self._sync_selected_style()
         self.update_details()
         self._adapt_window_height()
         self.refresh_job = self.root.after(2000, self.refresh)
+
+    def _poll_active_window(self) -> None:
+        """Track focus cheaply so reverse highlighting is independent of full refreshes."""
+        self.active_poll_job = None
+        try:
+            active_item = item_id_for_window(self.items, active_window_id())
+        except (X11Error, ValueError):
+            active_item = None
+        if active_item != self._observed_active_item:
+            self._observed_active_item = active_item
+            if active_item and self.tree.exists(active_item):
+                self.tree.selection_set(active_item)
+                self.tree.focus(active_item)
+                self.tree.see(active_item)
+                self._flash_workspace_item(active_item)
+        self.active_poll_job = self.root.after(200, self._poll_active_window)
 
     def _directory_for(
         self,
@@ -836,9 +843,11 @@ class TerminalManagerApp:
 
     def _clear_workspace_highlight(self) -> None:
         self._focus_clear_job = None
+        if self.focused_item_id and self._focus_saved_tags and self.tree.exists(self.focused_item_id):
+            self.tree.item(self.focused_item_id, tags=self._focus_saved_tags)
         self.focused_item_id = None
         self._focus_saved_tags = None
-        self.refresh()
+        self._sync_selected_style()
 
     def _harvest_tab_scan(self) -> None:
         if self._tab_scan_result is not None:
