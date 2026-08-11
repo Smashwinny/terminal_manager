@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from typing import Iterable
 
 from .model import WindowInfo, normalize_window_id
@@ -62,16 +63,52 @@ def active_window_id() -> str:
     return normalize_window_id(int(result.stdout.strip()))
 
 
-def focus_window(window_id: str) -> None:
+def focus_window(window_id: str, *, shake: bool = True) -> None:
     require_x11()
     wid = normalize_window_id(window_id)
     # wmctrl switches desktop when necessary; xdotool then raises and focuses it.
     subprocess.run(["wmctrl", "-i", "-a", wid], timeout=3, check=False)
     subprocess.run(["xdotool", "windowraise", wid], timeout=2, check=False)
     subprocess.run(["xdotool", "windowactivate", "--sync", wid], timeout=3, check=False)
+    if shake:
+        shake_window(wid)
+
+
+def shake_window(window_id: str) -> None:
+    """Give a focused window a short horizontal shake and restore its position.
+
+    Relative moves avoid geometry/frame-coordinate differences between window
+    managers. The deltas sum to zero, and the finally block compensates for any
+    successful partial sequence if xdotool fails midway. Maximized windows are
+    normally immovable, in which case the window manager simply ignores this.
+    """
+    wid = normalize_window_id(window_id)
+    deltas = (10, -20, 18, -16, 12, -8, 4)
+    applied = 0
+    try:
+        for delta in deltas:
+            result = subprocess.run(
+                ["xdotool", "windowmove", "--relative", wid, str(delta), "0"],
+                timeout=1,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if result.returncode != 0:
+                break
+            applied += delta
+            time.sleep(0.04)
+    finally:
+        if applied:
+            subprocess.run(
+                ["xdotool", "windowmove", "--relative", wid, str(-applied), "0"],
+                timeout=1,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
 
 def find_window(window_id: str, windows: Iterable[WindowInfo]) -> WindowInfo | None:
     wanted = normalize_window_id(window_id)
     return next((window for window in windows if window.window_id == wanted), None)
-
