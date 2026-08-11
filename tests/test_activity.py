@@ -19,7 +19,9 @@ def test_activity_threshold_and_hold(_clock, capture) -> None:
     capture.side_effect = [b"a" * 100, b"a" * 90 + b"b" * 10, b"a" * 90 + b"b" * 10]
 
     assert tracker.update([WINDOW])[WINDOW.window_id].status == "observing"
-    assert tracker.update([WINDOW])[WINDOW.window_id].status == "active"
+    active = tracker.update([WINDOW])[WINDOW.window_id]
+    assert active.status == "active"
+    assert active.active_seconds == 0
     assert tracker.update([WINDOW])[WINDOW.window_id].status == "static"
 
 
@@ -27,4 +29,3 @@ def test_activity_threshold_and_hold(_clock, capture) -> None:
 def test_capture_failure_is_unknown(_capture) -> None:
     state = WindowActivityTracker().update([WINDOW])[WINDOW.window_id]
     assert state.status == "unknown"
-

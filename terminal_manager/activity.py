@@ -13,6 +13,7 @@ class ActivityState:
     status: str
     changed_ratio: float
     seconds_since_change: float | None
+    active_seconds: float | None
     samples: int
 
 
@@ -22,6 +23,7 @@ class _History:
     last_change: float
     samples: int
     has_change: bool = False
+    active_since: float | None = None
 
 
 class WindowActivityTracker:
@@ -40,22 +42,30 @@ class WindowActivityTracker:
         live_ids = {window.window_id for window in windows}
         for window, sample in zip(windows, captures):
             if not sample:
-                states[window.window_id] = ActivityState("unknown", 0.0, None, 0)
+                states[window.window_id] = ActivityState("unknown", 0.0, None, None, 0)
                 continue
             previous = self._history.get(window.window_id)
             if previous is None:
                 self._history[window.window_id] = _History(sample, now, 1)
-                states[window.window_id] = ActivityState("observing", 0.0, None, 1)
+                states[window.window_id] = ActivityState("observing", 0.0, None, None, 1)
                 continue
             ratio = changed_ratio(previous.sample, sample)
             previous.sample = sample
             previous.samples += 1
+            was_active = previous.has_change and now - previous.last_change <= self.active_hold_seconds
             if ratio >= self.threshold:
+                if not was_active:
+                    previous.active_since = now
                 previous.last_change = now
                 previous.has_change = True
             age = max(0.0, now - previous.last_change)
             status = "active" if previous.has_change and age <= self.active_hold_seconds else "static"
-            states[window.window_id] = ActivityState(status, ratio, age, previous.samples)
+            active_seconds = (
+                max(0.0, now - previous.active_since)
+                if status == "active" and previous.active_since is not None
+                else None
+            )
+            states[window.window_id] = ActivityState(status, ratio, age, active_seconds, previous.samples)
         for stale_id in set(self._history) - live_ids:
             del self._history[stale_id]
         return states

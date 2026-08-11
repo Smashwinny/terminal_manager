@@ -257,56 +257,42 @@ class TerminalManagerApp:
         self.items.clear()
         query = self.search_var.get().strip().lower()
         row_index = 0
-        covered_windows: set[str] = set()
-        for info in sorted(shells, key=lambda item: (item.status == "ended", item.name.lower())):
-            window = find_window(info.window_id, self.windows)
-            if window:
-                covered_windows.add(info.window_id)
-            activity = self.activities.get(info.window_id)
-            status = activity.status if activity else "ended"
-            searchable = " ".join(
-                (info.name, status, STATUS_LABELS.get(status, ""), window.title if window else "")
-            ).lower()
-            if query and query not in searchable:
-                continue
-            iid = f"shell:{info.shell_id}"
-            self.items[iid] = (info, window)
-            self.tree.insert(
-                "",
-                tk.END,
-                iid=iid,
-                values=(
-                    info.name,
-                    status_text(status),
-                    ratio_text(activity),
-                    age_text(activity),
-                    window.title if window else f"{info.window_id}（未找到）",
-                ),
-                tags=(status, "even" if row_index % 2 == 0 else "odd"),
-            )
-            row_index += 1
-
-        for window in sorted(self.windows, key=lambda item: item.title.lower()):
-            if window.window_id in covered_windows:
-                continue
-            searchable = f"{window.title} {window.wm_class} 未注册".lower()
-            if query and query not in searchable:
-                continue
-            iid = f"window:{window.window_id}"
+        records_by_window = {info.window_id: info for info in shells}
+        used_record_ids: set[str] = set()
+        rows: list[tuple[ShellInfo | None, WindowInfo | None, ActivityState | None, str, str]] = []
+        for window in self.windows:
+            info = records_by_window.get(window.window_id)
+            if info:
+                used_record_ids.add(info.shell_id)
             activity = self.activities.get(window.window_id)
             status = activity.status if activity else "unknown"
-            self.items[iid] = (None, window)
+            name = info.name if info else (window.title or "终端窗口")
+            rows.append((info, window, activity, status, name))
+        for info in shells:
+            if info.shell_id not in used_record_ids:
+                rows.append((info, None, None, "ended", info.name))
+
+        rows.sort(key=lambda row: activity_sort_key(row[2], row[3], row[4]))
+        for info, window, activity, status, name in rows:
+            window_title = window.title if window else f"{info.window_id}（未找到）" if info else "窗口不存在"
+            searchable = " ".join((name, status, STATUS_LABELS.get(status, ""), window_title)).lower()
+            if query and query not in searchable:
+                continue
+            iid = f"shell:{info.shell_id}" if info else f"window:{window.window_id}"
+            self.items[iid] = (info, window)
+            registered_prefix = "" if info else "未登记 · "
             self.tree.insert(
                 "",
                 tk.END,
                 iid=iid,
-                values=(window.title or "终端窗口", status_text(status), ratio_text(activity), age_text(activity), f"未登记 · {window.title}"),
+                values=(name, status_text(status), ratio_text(activity), age_text(activity), registered_prefix + window_title),
                 tags=(status, "even" if row_index % 2 == 0 else "odd"),
             )
             row_index += 1
 
-        unregistered = sum(1 for window in self.windows if window.window_id not in covered_windows)
-        total = len(shells) + unregistered
+        registered_window_ids = {info.window_id for info in shells}
+        unregistered = sum(1 for window in self.windows if window.window_id not in registered_window_ids)
+        total = len(rows)
         running = sum(1 for state in self.activities.values() if state.status == "active")
         idle = sum(1 for state in self.activities.values() if state.status == "static")
         values = {"total": total, "running": running, "idle": idle, "unregistered": unregistered}
@@ -463,15 +449,27 @@ def ratio_text(activity: ActivityState | None) -> str:
 def age_text(activity: ActivityState | None) -> str:
     if not activity or activity.seconds_since_change is None:
         return "等待第二次采样"
-    if activity.seconds_since_change < 0.5:
-        return "刚刚"
-    return f"{activity.seconds_since_change:.1f} 秒前"
+    if activity.status == "active":
+        duration = activity.active_seconds or 0.0
+        return "刚开始输出" if duration < 0.5 else f"已输出 {duration:.1f} 秒"
+    return "刚停止" if activity.seconds_since_change < 0.5 else f"停止 {activity.seconds_since_change:.1f} 秒"
+
+
+def activity_sort_key(
+    activity: ActivityState | None, status: str, name: str
+) -> tuple[int, float, str]:
+    if status == "static" and activity:
+        return (0, activity.seconds_since_change or 0.0, name.lower())
+    if status == "active" and activity:
+        return (2, activity.active_seconds or 0.0, name.lower())
+    return (1, 0.0, name.lower())
 
 
 def activity_explanation(activity: ActivityState) -> str:
     ratio = f"{activity.changed_ratio:.3%}"
     if activity.status == "active":
-        return f"正在输出：最近检测到终端画面变化，本次变化比例 {ratio}。状态会保持约 4 秒。"
+        duration = activity.active_seconds or 0.0
+        return f"正在输出：最近检测到终端画面变化，本次变化比例 {ratio}，本轮已连续输出 {duration:.1f} 秒。"
     if activity.status == "static":
         return f"静态/空闲：最近没有达到阈值的画面变化，本次变化比例 {ratio}。"
     if activity.status == "observing":
