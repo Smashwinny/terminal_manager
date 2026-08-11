@@ -39,20 +39,49 @@ Terminal Manager 不接管 PTY、不迁移 Shell，也不会终止现有任务�
 
 识别不读取终端画面或文字，因此滚动历史、光标闪烁和窗口重绘不会误判为输出。未知动画只有在标题主体不变、至少三个不同单字符前缀连续轮换后才会被学习。
 
-## 系统要求
+## 支持环境与适配范围
 
-- Linux X11 桌面（首版暂不支持 Wayland）；
-- Python 3.9+ 和 Tk；
-- GNOME Terminal 隐藏标签管理需要系统的 Python AT-SPI（Ubuntu 桌面通常已预装 `python3-pyatspi`）；
-- `wmctrl`、`xdotool`。
+当前版本面向 Linux X11 桌面，主要开发和验证环境为 Ubuntu + GNOME + GNOME Terminal。
 
-Ubuntu/Debian 安装依赖：
+| 环境 | 支持程度 | 说明 |
+|---|---|---|
+| Ubuntu 22.04/24.04 + Xorg + GNOME Terminal | 主要适配环境 | 窗口发现、聚焦、状态、PWD、多标签展开/切换、TTY 学习和原生背景高亮 |
+| 其他 X11 桌面 + GNOME Terminal | 基本可用 | 窗口管理器的聚焦和窗口装饰行为可能略有差异 |
+| Konsole、Tilix、Kitty、Alacritty、WezTerm、XTerm 等 X11 终端 | 基础支持 | 可发现和聚焦窗口；隐藏标签管理目前只完整适配 GNOME Terminal |
+| GNOME/KDE Wayland | 不支持 | Wayland 默认禁止普通应用枚举、聚焦和截图其他窗口 |
+| SSH 纯命令行、无桌面服务器 | 不支持 | 本项目是本机图形桌面应用，需要 `DISPLAY` 和 X11 会话 |
+
+安装前确认当前会话：
 
 ```bash
-sudo apt install python3-tk python3-pyatspi wmctrl xdotool
+echo "$XDG_SESSION_TYPE"
+echo "$DISPLAY"
 ```
 
+预期第一条输出 `x11`，第二条输出类似 `:0` 或 `:1`。如果输出 `wayland`，请退出登录，在登录界面的齿轮菜单选择“Ubuntu on Xorg”后重新登录。
+
+## 完整依赖
+
+- Python 3.9+、Tk 和 pip；
+- `wmctrl`：枚举并激活现有窗口；
+- `xdotool`：读取活动窗口、聚焦和定位反馈；
+- `python3-pyatspi`：读取 GNOME Terminal 标签列表并切换隐藏标签；
+- `xwd`（Ubuntu 包 `x11-apps`）和 `ffmpeg`：首次学习标签 TTY 时执行一次性小图像探测；
+- GNOME Terminal 原生背景高亮使用 OSC 11，不修改终端配置文件。
+
+Ubuntu/Debian 一次安装全部依赖：
+
+```bash
+sudo apt update
+sudo apt install git python3 python3-pip python3-tk python3-pyatspi \
+  wmctrl xdotool x11-apps ffmpeg
+```
+
+缺少 `python3-pyatspi` 时，普通终端窗口仍能显示，但 GNOME Terminal 多标签识别不可用。缺少 `xwd` 或 `ffmpeg` 时，聚焦和震动仍可用，但未知标签无法自动学习 TTY 并改变终端背景色。
+
 ## 安装
+
+安装是用户级操作，不要使用 `sudo ./install.sh`：
 
 ```bash
 git clone https://github.com/Smashwinny/terminal_manager.git
@@ -61,21 +90,87 @@ chmod +x install.sh uninstall.sh
 ./install.sh
 ```
 
-随后运行：
+安装脚本会执行以下操作：
+
+- 将 Python 包和命令安装到 `~/.local`；
+- 安装桌面入口到 `~/.local/share/applications/terminal-manager.desktop`；
+- 安装无黑边图标到 `~/.local/share/icons/hicolor/64x64/apps/terminal-manager.png`；
+- 不关闭、不迁移、不重启任何已经打开的 Shell。
+
+如果系统提示 `externally-managed-environment`，说明发行版禁止 pip 直接写入用户环境。建议在虚拟环境中安装：
 
 ```bash
+sudo apt install python3-venv
+python3 -m venv ~/.local/share/terminal-manager/venv
+~/.local/share/terminal-manager/venv/bin/pip install --no-build-isolation .
+```
+
+这种安装方式的启动命令是：
+
+```bash
+~/.local/share/terminal-manager/venv/bin/terminal-manager
+```
+
+注意：当前 `install.sh` 生成的应用菜单入口仍指向 `~/.local/bin/terminal-manager`。使用虚拟环境方案时应先用上面的命令启动；如需应用菜单入口，请把 `packaging/terminal-manager.desktop` 中的 `Exec` 改为虚拟环境中的绝对路径后复制到 `~/.local/share/applications/terminal-manager.desktop`。
+
+推荐使用绝对路径启动：
+
+```bash
+~/.local/bin/terminal-manager
+```
+
+也可以在桌面应用菜单搜索“Terminal Manager”或“终端总控”。若希望直接输入命令，可把用户命令目录加入 PATH：
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 terminal-manager
 ```
 
-也可以在桌面应用菜单搜索“Terminal Manager”或“终端总控”。如果 `~/.local/bin` 尚未加入当前 Shell 的 `PATH`，可先运行：
+## 升级
+
+升级不会影响任何正在运行的终端任务，只需要重新启动管理器本身：
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+cd terminal_manager
+git pull --ff-only
+./install.sh
 ```
 
-## 管理当前已经打开的 Shell
+如果旧版管理器仍在运行，关闭管理器窗口后重新执行：
 
-启动总控后，现有终端窗口会直接显示为“未注册”，此时已经可以点击进入。
+```bash
+~/.local/bin/terminal-manager
+```
+
+不需要关闭现有 GNOME Terminal、Codex、Agent、编译或 ROS 任务。
+
+## 使用方式
+
+1. 先打开或保留需要管理的终端，再启动 Terminal Manager；后续新开的终端也会在约 2 秒内自动出现。
+2. 未登记窗口已经可以聚焦和查看状态；选择条目后点击“登记窗口”，只需填写便于识别的用途名称。
+3. 双击普通条目或按 Enter 可进入目标终端并触发震动和紫色短时定位。
+4. 多标签窗口只有单击名称最前方的小三角 `▸ / ▾` 才会展开或折叠；双击不会改变展开状态。
+5. 单击展开后的缩进标签，可切换到该隐藏标签并聚焦所属终端窗口。
+6. “目录”列每约 2 秒从根 Shell 的 `/proc/<pid>/cwd` 读取真实 PWD，主目录显示为 `~`。
+7. 顶部“渲染”圆点开关默认开启：输出升温、等待保温、静态冷却；关闭后恢复简版行颜色。
+
+### 首次高亮学习
+
+新标签第一次进入时，管理器需要确认它对应哪个 `/dev/pts/*`：
+
+- 只在未知标签首次使用、TTY 失效或标签关系变化时探测；
+- 候选终端会收到极短的测试背景色，管理器只采样缩小后的窗口图像；
+- 学习完成后按“窗口 + 标签”缓存，后续点击直接高亮，不持续截图；
+- 学习失败时仍可正常聚焦和震动，只是不改变终端原生背景色。
+
+TTY 缓存默认位于：
+
+```text
+~/.local/state/terminal-manager/tty-bindings.json
+```
+
+### 登记、重命名和移除
 
 选择一个窗口，点击“登记窗口”或“编辑记录”，直接填写用途名称并保存。
 
@@ -95,6 +190,63 @@ terminal-manager-unregister
 
 也可以在总控中选择条目后点击“移除记录”。移除记录不会关闭 Shell 或终止任务。
 
+登记信息默认保存在：
+
+```text
+~/.local/state/terminal-manager/shells/
+```
+
+如果设置了 `XDG_STATE_HOME`，以上两个状态路径会改为 `$XDG_STATE_HOME/terminal-manager/` 下的对应位置。
+
+## 常见问题
+
+### 启动后看不到终端
+
+确认当前是 X11 会话，并检查依赖：
+
+```bash
+echo "$XDG_SESSION_TYPE"
+echo "$DISPLAY"
+wmctrl -lx
+xdotool getactivewindow
+```
+
+### GNOME Terminal 的隐藏标签没有出现
+
+确认 AT-SPI 已安装：
+
+```bash
+python3 -c 'import pyatspi; print("pyatspi OK")'
+```
+
+然后等待 2–4 秒让后台标签扫描完成。
+
+### 能聚焦，但终端没有紫色背景高亮
+
+确认探测工具存在：
+
+```bash
+command -v xwd
+command -v ffmpeg
+```
+
+如果标签曾被移动到其他窗口且缓存异常，可先备份缓存后重新学习：
+
+```bash
+mv ~/.local/state/terminal-manager/tty-bindings.json \
+  ~/.local/state/terminal-manager/tty-bindings.json.bak
+```
+
+重新启动管理器并再次点击标签即可。
+
+### 状态一直显示静态
+
+状态来自 Codex/Agent 写入的窗口标题图标，不读取终端正文。普通 Shell、没有标题集成的程序或自行覆盖标题的程序会显示静态，这是预期行为。
+
+### 更新后应用菜单图标没有变化
+
+重新运行 `./install.sh` 后关闭并重新打开管理器。必要时注销桌面会话再登录，让桌面 Shell 重新读取用户图标缓存。
+
 ## 开发与测试
 
 无需安装即可从源码运行：
@@ -103,17 +255,20 @@ terminal-manager-unregister
 python3 -m terminal_manager.app
 ```
 
-测试：
+完整测试：
 
 ```bash
 python3 -m pytest
 ```
+
+开发模式仍需要 X11 依赖；纯逻辑测试不要求启动图形窗口。
 
 ## 已知限制
 
 - GNOME Terminal 的隐藏标签可展开、读取标题、判断标题状态和切换；其他终端模拟器是否支持隐藏标签取决于后续适配。
 - Wayland 默认禁止普通应用任意聚焦其他窗口，需要后续实现 GNOME/KDE 专用适配器。
 - 状态监测依赖 Agent 设置终端标题；普通 Shell 和没有标题集成的 Agent 会显示静态。
+- GNOME Terminal 没有公开“标签到 TTY”的直接映射，因此首次原生背景高亮需要一次性视觉学习。
 
 ## 卸载
 
@@ -122,6 +277,8 @@ python3 -m pytest
 ```
 
 卸载不会影响任何终端或任务。
+
+卸载默认保留 `~/.local/state/terminal-manager/` 中的登记名称和 TTY 缓存，方便以后重新安装。若确定不再需要，可自行备份后删除。
 
 ## License
 
