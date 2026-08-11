@@ -21,6 +21,7 @@ STATUS_COLORS = {
     "unknown": "#c4a7ff",
     "observing": "#c4a7ff",
     "active": "#46d483",
+    "waiting": "#fbbf55",
     "static": "#94a3b8",
     "unbound": "#f0a95b",
     "window": "#67b7ff",
@@ -95,6 +96,7 @@ class TerminalManagerApp:
         self.metric_values: dict[str, tk.Label] = {}
         metrics = (
             ("total", "全部终端", PALETTE["cyan"]),
+            ("waiting", "等待用户", STATUS_COLORS["waiting"]),
             ("running", "正在输出", STATUS_COLORS["active"]),
             ("idle", "静态窗口", STATUS_COLORS["static"]),
             ("unregistered", "待注册", STATUS_COLORS["window"]),
@@ -161,8 +163,8 @@ class TerminalManagerApp:
         labels = {
             "name": "名称",
             "status": "状态",
-            "activity": "本次画面变化",
-            "last_change": "最近变化",
+            "activity": "标题信号",
+            "last_change": "当前状态时长",
             "window": "窗口",
         }
         widths = {"name": 220, "status": 125, "activity": 160, "last_change": 170, "window": 390}
@@ -285,7 +287,7 @@ class TerminalManagerApp:
                 "",
                 tk.END,
                 iid=iid,
-                values=(name, status_text(status), ratio_text(activity), age_text(activity), registered_prefix + window_title),
+                values=(name, status_text(status), signal_text(activity), age_text(activity), registered_prefix + window_title),
                 tags=(status, "even" if row_index % 2 == 0 else "odd"),
             )
             row_index += 1
@@ -294,8 +296,9 @@ class TerminalManagerApp:
         unregistered = sum(1 for window in self.windows if window.window_id not in registered_window_ids)
         total = len(rows)
         running = sum(1 for state in self.activities.values() if state.status == "active")
+        waiting = sum(1 for state in self.activities.values() if state.status == "waiting")
         idle = sum(1 for state in self.activities.values() if state.status == "static")
-        values = {"total": total, "running": running, "idle": idle, "unregistered": unregistered}
+        values = {"total": total, "waiting": waiting, "running": running, "idle": idle, "unregistered": unregistered}
         for key, value in values.items():
             self.metric_values[key].configure(text=str(value))
         if error:
@@ -415,7 +418,7 @@ class TerminalManagerApp:
         shell.shell_pid = 0
         shell.tty = ""
         shell.status = "unbound"
-        shell.status_detail = "窗口活动由画面变化直接检测"
+        shell.status_detail = "Codex 状态由终端窗口标题识别"
         shell.command = ""
         shell.cwd = ""
         shell.foreground_pid = None
@@ -440,41 +443,45 @@ def status_text(status: str) -> str:
     return f"{STATUS_DOTS.get(status, '●')}  {STATUS_LABELS.get(status, status)}"
 
 
-def ratio_text(activity: ActivityState | None) -> str:
-    if not activity or activity.samples < 2:
-        return "采样中"
-    return f"{activity.changed_ratio:.3%}"
+def signal_text(activity: ActivityState | None) -> str:
+    if not activity:
+        return "无状态信号"
+    if activity.status == "waiting":
+        return f"{activity.prefix} 需要输入"
+    if activity.status == "active":
+        source = "已学习动画" if activity.learned_prefix else "Codex 动画"
+        return f"{activity.prefix} {source}"
+    return "无 Codex 状态图标"
 
 
 def age_text(activity: ActivityState | None) -> str:
-    if not activity or activity.seconds_since_change is None:
-        return "等待第二次采样"
+    if not activity:
+        return "未知"
+    duration = activity.seconds_in_status
+    if activity.status == "waiting":
+        return "刚需输入" if duration < 0.5 else f"等待 {duration:.1f} 秒"
     if activity.status == "active":
-        duration = activity.active_seconds or 0.0
         return "刚开始输出" if duration < 0.5 else f"已输出 {duration:.1f} 秒"
-    return "刚停止" if activity.seconds_since_change < 0.5 else f"停止 {activity.seconds_since_change:.1f} 秒"
+    return "刚静止" if duration < 0.5 else f"静态 {duration:.1f} 秒"
 
 
 def activity_sort_key(
     activity: ActivityState | None, status: str, name: str
 ) -> tuple[int, float, str]:
-    if status == "static" and activity:
-        return (0, activity.seconds_since_change or 0.0, name.lower())
-    if status == "active" and activity:
-        return (2, activity.active_seconds or 0.0, name.lower())
-    return (1, 0.0, name.lower())
+    order = {"waiting": 0, "active": 1, "static": 2}
+    return (order.get(status, 3), activity.seconds_in_status if activity else 0.0, name.lower())
 
 
 def activity_explanation(activity: ActivityState) -> str:
-    ratio = f"{activity.changed_ratio:.3%}"
+    duration = activity.seconds_in_status
+    if activity.status == "waiting":
+        return f"等待用户：Codex 在窗口标题中显示“{activity.prefix}”，已等待 {duration:.1f} 秒。"
     if activity.status == "active":
-        duration = activity.active_seconds or 0.0
-        return f"正在输出：最近检测到终端画面变化，本次变化比例 {ratio}，本轮已连续输出 {duration:.1f} 秒。"
+        source = "自动学习到的动画前缀" if activity.learned_prefix else "Codex 标准动画前缀"
+        return f"正在输出：窗口标题正在显示{source}“{activity.prefix}”，已持续 {duration:.1f} 秒。"
     if activity.status == "static":
-        return f"静态/空闲：最近没有达到阈值的画面变化，本次变化比例 {ratio}。"
-    if activity.status == "observing":
-        return "正在采样：需要至少两帧画面才能判断输出是否变化。"
-    return "无法读取窗口画面，因此当前活动状态未知。"
+        return f"静态/空闲：窗口标题没有 Codex 状态图标，已持续 {duration:.1f} 秒。"
+    return "无法从窗口标题判断当前状态。"
 
 
 def item_id_for_window(

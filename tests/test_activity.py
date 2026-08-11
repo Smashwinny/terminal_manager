@@ -1,31 +1,43 @@
 from unittest.mock import patch
 
-from terminal_manager.activity import WindowActivityTracker, changed_ratio
+from terminal_manager.activity import WindowActivityTracker, split_status_prefix
 from terminal_manager.model import WindowInfo
 
 
-WINDOW = WindowInfo("0x0000002a", 0, 1, 0, 0, 800, 600, "XTerm.XTerm", "host", "test")
+def window(title: str) -> WindowInfo:
+    return WindowInfo("0x0000002a", 0, 1, 0, 0, 800, 600, "XTerm.XTerm", "host", title)
 
 
-def test_changed_ratio() -> None:
-    assert changed_ratio(b"aaaa", b"aaaa") == 0
-    assert changed_ratio(b"aaaa", b"abaa") == 0.25
+def test_split_status_prefix() -> None:
+    assert split_status_prefix("⠹ hulk") == ("⠹", "hulk")
+    assert split_status_prefix("mobile ledger") == ("", "mobile ledger")
 
 
-@patch("terminal_manager.activity._capture_window")
 @patch("terminal_manager.activity.time.monotonic", side_effect=[0.0, 2.0, 7.0])
-def test_activity_threshold_and_hold(_clock, capture) -> None:
-    tracker = WindowActivityTracker(threshold=0.05, active_hold_seconds=4.0)
-    capture.side_effect = [b"a" * 100, b"a" * 90 + b"b" * 10, b"a" * 90 + b"b" * 10]
+def test_known_codex_states(_clock) -> None:
+    tracker = WindowActivityTracker()
+    assert tracker.update([window("⠹ hulk")])["0x0000002a"].status == "active"
+    waiting = tracker.update([window("! hulk")])["0x0000002a"]
+    assert waiting.status == "waiting"
+    assert waiting.seconds_in_status == 0
+    static = tracker.update([window("hulk")])["0x0000002a"]
+    assert static.status == "static"
 
-    assert tracker.update([WINDOW])[WINDOW.window_id].status == "observing"
-    active = tracker.update([WINDOW])[WINDOW.window_id]
-    assert active.status == "active"
-    assert active.active_seconds == 0
-    assert tracker.update([WINDOW])[WINDOW.window_id].status == "static"
+
+def test_unknown_rotating_prefix_is_learned() -> None:
+    tracker = WindowActivityTracker(learning_threshold=3)
+    assert tracker.update([window("◐ project")])["0x0000002a"].status == "static"
+    assert tracker.update([window("◓ project")])["0x0000002a"].status == "static"
+    learned = tracker.update([window("◑ project")])["0x0000002a"]
+    assert learned.status == "active"
+    assert learned.learned_prefix
+    assert {"◐", "◓", "◑"} <= tracker.learned_spinner_prefixes
 
 
-@patch("terminal_manager.activity._capture_window", return_value=None)
-def test_capture_failure_is_unknown(_capture) -> None:
-    state = WindowActivityTracker().update([WINDOW])[WINDOW.window_id]
-    assert state.status == "unknown"
+def test_title_rename_is_not_learned_as_animation() -> None:
+    tracker = WindowActivityTracker(learning_threshold=3)
+    tracker.update([window("A project")])
+    tracker.update([window("B another-project")])
+    state = tracker.update([window("C third-project")])["0x0000002a"]
+    assert state.status == "static"
+    assert not tracker.learned_spinner_prefixes

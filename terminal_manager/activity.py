@@ -1,96 +1,109 @@
 from __future__ import annotations
 
-import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .model import WindowInfo
+
+
+# Codex currently rotates these one-character title prefixes while it works.
+# Unknown animations are learned below, so a future Codex spinner does not
+# require an application release as long as it keeps the same title protocol.
+CODEX_SPINNER_PREFIXES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+WAITING_PREFIXES = frozenset(("!", "！", "❗", "⚠"))
 
 
 @dataclass(frozen=True)
 class ActivityState:
     status: str
-    changed_ratio: float
-    seconds_since_change: float | None
-    active_seconds: float | None
+    seconds_in_status: float
     samples: int
+    prefix: str = ""
+    learned_prefix: bool = False
 
 
 @dataclass
 class _History:
-    sample: bytes
-    last_change: float
-    samples: int
-    has_change: bool = False
-    active_since: float | None = None
+    prefix: str
+    body: str
+    status: str
+    status_since: float
+    samples: int = 1
+    candidate_body: str = ""
+    candidate_prefixes: set[str] = field(default_factory=set)
 
 
 class WindowActivityTracker:
-    """Classify terminal windows by recent visual output changes."""
+    """Classify Codex state from its terminal-title status prefix.
 
-    def __init__(self, threshold: float = 0.0005, active_hold_seconds: float = 4.0) -> None:
-        self.threshold = threshold
-        self.active_hold_seconds = active_hold_seconds
+    Learning is deliberately conservative: an unknown prefix is accepted as a
+    spinner only after three different one-character prefixes rotate while the
+    rest of the title remains identical. Scrolling terminal contents cannot
+    affect this signal.
+    """
+
+    def __init__(self, learning_threshold: int = 3) -> None:
+        self.learning_threshold = max(2, learning_threshold)
+        self.learned_spinner_prefixes: set[str] = set()
         self._history: dict[str, _History] = {}
 
     def update(self, windows: list[WindowInfo]) -> dict[str, ActivityState]:
         now = time.monotonic()
-        with ThreadPoolExecutor(max_workers=min(8, max(1, len(windows)))) as pool:
-            captures = list(pool.map(_capture_window, windows))
         states: dict[str, ActivityState] = {}
         live_ids = {window.window_id for window in windows}
-        for window, sample in zip(windows, captures):
-            if not sample:
-                states[window.window_id] = ActivityState("unknown", 0.0, None, None, 0)
-                continue
+
+        for window in windows:
+            prefix, body = split_status_prefix(window.title)
             previous = self._history.get(window.window_id)
             if previous is None:
-                self._history[window.window_id] = _History(sample, now, 1)
-                states[window.window_id] = ActivityState("observing", 0.0, None, None, 1)
-                continue
-            ratio = changed_ratio(previous.sample, sample)
-            previous.sample = sample
-            previous.samples += 1
-            was_active = previous.has_change and now - previous.last_change <= self.active_hold_seconds
-            if ratio >= self.threshold:
-                if not was_active:
-                    previous.active_since = now
-                previous.last_change = now
-                previous.has_change = True
-            age = max(0.0, now - previous.last_change)
-            status = "active" if previous.has_change and age <= self.active_hold_seconds else "static"
-            active_seconds = (
-                max(0.0, now - previous.active_since)
-                if status == "active" and previous.active_since is not None
-                else None
+                status = self._classify(prefix)
+                previous = _History(prefix, body, status, now)
+                self._history[window.window_id] = previous
+            else:
+                previous.samples += 1
+                self._learn_animation(previous, prefix, body)
+                status = self._classify(prefix)
+                if status != previous.status:
+                    previous.status = status
+                    previous.status_since = now
+                previous.prefix = prefix
+                previous.body = body
+
+            states[window.window_id] = ActivityState(
+                previous.status,
+                max(0.0, now - previous.status_since),
+                previous.samples,
+                prefix,
+                prefix in self.learned_spinner_prefixes,
             )
-            states[window.window_id] = ActivityState(status, ratio, age, active_seconds, previous.samples)
+
         for stale_id in set(self._history) - live_ids:
             del self._history[stale_id]
         return states
 
+    def _classify(self, prefix: str) -> str:
+        if prefix in WAITING_PREFIXES:
+            return "waiting"
+        if prefix in CODEX_SPINNER_PREFIXES or prefix in self.learned_spinner_prefixes:
+            return "active"
+        return "static"
 
-def _capture_window(window: WindowInfo) -> bytes | None:
-    try:
-        result = subprocess.run(
-            ["xwd", "-silent", "-id", window.window_id],
-            capture_output=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0 or not result.stdout:
-        return None
-    # One byte per pixel is enough to detect redraws and keeps comparisons cheap.
-    return result.stdout[::4]
+    def _learn_animation(self, history: _History, prefix: str, body: str) -> None:
+        if not prefix or not body or body != history.body or prefix == history.prefix:
+            history.candidate_body = body
+            history.candidate_prefixes.clear()
+            return
+        if history.candidate_body != body:
+            history.candidate_body = body
+            history.candidate_prefixes = {history.prefix}
+        history.candidate_prefixes.add(prefix)
+        if len(history.candidate_prefixes) >= self.learning_threshold:
+            self.learned_spinner_prefixes.update(history.candidate_prefixes)
 
 
-def changed_ratio(before: bytes, after: bytes) -> float:
-    length = min(len(before), len(after))
-    if not length:
-        return 1.0 if before != after else 0.0
-    changed = sum(left != right for left, right in zip(before[:length], after[:length]))
-    changed += abs(len(before) - len(after))
-    return changed / max(len(before), len(after))
+def split_status_prefix(title: str) -> tuple[str, str]:
+    """Return a possible one-character status prefix and the stable title body."""
+    first, separator, body = title.strip().partition(" ")
+    if separator and len(first) == 1 and body:
+        return first, body
+    return "", title.strip()
