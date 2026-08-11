@@ -3,8 +3,12 @@ from __future__ import annotations
 import fcntl
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import IO
+
+
+DETACHED_CHILD_ENV = "TERMINAL_MANAGER_DETACHED_CHILD"
 
 
 class SingleInstance:
@@ -47,3 +51,26 @@ def activate_existing() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def launch_detached() -> None:
+    """Start the GUI in a terminal-independent process session."""
+    env = os.environ.copy()
+    env[DETACHED_CHILD_ENV] = "1"
+    package_root = str(Path(__file__).resolve().parent.parent)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, existing_pythonpath)))
+    state_root = Path(env.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    log_path = state_root / "terminal-manager" / "terminal-manager.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log_file:
+        subprocess.Popen(
+            [sys.executable, "-m", "terminal_manager.app"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            cwd="/",
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+        )

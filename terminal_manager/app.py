@@ -4,6 +4,7 @@ import time
 import tkinter as tk
 import threading
 import uuid
+import os
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -12,7 +13,7 @@ from .activity import ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
-from .single_instance import SingleInstance, activate_existing
+from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
 from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
@@ -1064,6 +1065,15 @@ def tab_window_signal(window: WindowInfo, tab: TerminalTab) -> WindowInfo:
 
 
 def main() -> None:
+    if not os.environ.get(DETACHED_CHILD_ENV):
+        probe = SingleInstance()
+        if not probe.acquire():
+            activate_existing()
+            return
+        probe.release()
+        launch_detached()
+        print("Terminal Manager 已在后台启动；现在可以关闭此终端。")
+        return
     instance = SingleInstance()
     if not instance.acquire():
         activate_existing()

@@ -119,6 +119,8 @@ python3 -m venv ~/.local/share/terminal-manager/venv
 ~/.local/bin/terminal-manager
 ```
 
+命令输出“已在后台启动”后会立即返回。管理器运行在独立桌面会话中，不依赖启动它的终端；此时可以关闭该终端，不会关闭管理器。重复执行启动命令不会多开，而是把已经运行的管理器切换到前台。后台启动日志位于 `~/.local/state/terminal-manager/terminal-manager.log`（设置 `XDG_STATE_HOME` 时跟随该目录）。
+
 也可以在桌面应用菜单搜索“Terminal Manager”或“终端总控”。若希望直接输入命令，可把用户命令目录加入 PATH：
 
 ```bash
