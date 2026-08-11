@@ -28,6 +28,27 @@ def terminal_ttys() -> list[str]:
     return sorted(ttys, key=_tty_number)
 
 
+def terminal_tty_cwds() -> dict[str, str]:
+    """Read the working directory of the root shell attached to each PTY."""
+    candidates: dict[str, tuple[int, str]] = {}
+    for process in Path("/proc").glob("[0-9]*"):
+        try:
+            pid = int(process.name)
+            command = (process / "comm").read_text(encoding="utf-8").strip()
+            if command not in {"bash", "zsh", "fish", "sh"}:
+                continue
+            tty = os.readlink(process / "fd" / "0")
+            if not tty.startswith("/dev/pts/"):
+                continue
+            cwd = os.readlink(process / "cwd")
+            previous = candidates.get(tty)
+            if previous is None or pid < previous[0]:
+                candidates[tty] = (pid, cwd)
+        except (OSError, ValueError, UnicodeError):
+            continue
+    return {tty: value[1] for tty, value in candidates.items()}
+
+
 def probe_visible_tty(window_id: str, *, settle_seconds: float = 0.045) -> str | None:
     """Learn which PTY is visible by applying and visually detecting a test colour."""
     if not _probe_tools_available():

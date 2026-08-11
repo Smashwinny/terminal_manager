@@ -4,6 +4,7 @@ import time
 import tkinter as tk
 import threading
 import uuid
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import __version__
@@ -14,7 +15,7 @@ from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
-from .tty_probe import probe_visible_tty
+from .tty_probe import probe_visible_tty, terminal_tty_cwds
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
@@ -203,7 +204,7 @@ class TerminalManagerApp:
         )
         search.pack(side=tk.LEFT, padx=(6, 0))
 
-        columns = ("name", "window", "status", "last_change", "activity")
+        columns = ("name", "window", "cwd", "status", "last_change", "activity")
         table = ttk.Frame(surface, style="Surface.TFrame")
         table.pack(fill=tk.BOTH, expand=True, padx=1)
         self.tree = ttk.Treeview(
@@ -217,11 +218,12 @@ class TerminalManagerApp:
         labels = {
             "name": "名称",
             "window": "窗口",
+            "cwd": "目录",
             "status": "状态",
             "last_change": "时长",
             "activity": "标题信号",
         }
-        widths = {"name": 245, "window": 315, "status": 125, "last_change": 145, "activity": 170}
+        widths = {"name": 205, "window": 225, "cwd": 265, "status": 110, "last_change": 125, "activity": 145}
         for key in columns:
             self.tree.heading(key, text=labels[key])
             self.tree.column(key, width=widths[key], minwidth=70, stretch=key == "window")
@@ -328,6 +330,7 @@ class TerminalManagerApp:
             error = str(exc)
 
         shells = load_shells()
+        tty_cwds = terminal_tty_cwds()
 
         self.tree.delete(*self.tree.get_children())
         self.items.clear()
@@ -379,6 +382,8 @@ class TerminalManagerApp:
                 continue
             group = self.tab_groups.get(window.window_id) if window else None
             iid = f"group:{window.window_id}" if group else f"shell:{info.shell_id}" if info else f"window:{window.window_id}"
+            tab_key = f"tab:{group.selected.index}" if group else "main"
+            cwd = self._directory_for(info, window, tab_key, tty_cwds)
             self.items[iid] = (info, window)
             registered_prefix = "" if info else "未登记 · "
             self.tree.insert(
@@ -388,6 +393,7 @@ class TerminalManagerApp:
                 values=(
                     f"{'▾' if window and window.window_id in expanded_windows else '▸'}  {name}" if group else name,
                     f"GNOME Terminal · {len(group.tabs)} 个标签" if group else registered_prefix + window_title,
+                    display_directory(cwd),
                     status_text(status),
                     age_text(activity),
                     signal_text(activity),
@@ -411,6 +417,7 @@ class TerminalManagerApp:
                     child_activity = tab_activities.get(tab.signal_id(window.window_id))
                     child_status = child_activity.status if child_activity else "static"
                     child_title = tab.title or f"标签 {tab.index + 1}"
+                    child_cwd = self._directory_for(info, window, f"tab:{tab.index}", tty_cwds)
                     self.items[child_id] = (info, window)
                     self.tab_items[child_id] = (group, tab.index)
                     self.tree.insert(
@@ -421,6 +428,7 @@ class TerminalManagerApp:
                         values=(
                             f"      └─  {child_title}",
                             f"同一窗口 · 标签 {tab.index + 1}",
+                            display_directory(child_cwd),
                             status_text(child_status),
                             age_text(child_activity),
                             signal_text(child_activity),
@@ -473,6 +481,21 @@ class TerminalManagerApp:
         self.update_details()
         self._adapt_window_height()
         self.refresh_job = self.root.after(2000, self.refresh)
+
+    def _directory_for(
+        self,
+        shell: ShellInfo | None,
+        window: WindowInfo | None,
+        tab_key: str,
+        tty_cwds: dict[str, str],
+    ) -> str:
+        window_id = window.window_id if window else shell.window_id if shell else ""
+        tty = self.tty_bindings.get(window_id, {}).get(tab_key, "")
+        if tty in tty_cwds:
+            return tty_cwds[tty]
+        if shell and shell.tty in tty_cwds:
+            return tty_cwds[shell.tty]
+        return shell.cwd if shell and shell.cwd else ""
 
     def selected(self) -> tuple[str, ShellInfo | None, WindowInfo | None] | None:
         selection = self.tree.selection()
@@ -889,6 +912,13 @@ class TerminalManagerApp:
 
 def status_text(status: str) -> str:
     return f"{STATUS_DOTS.get(status, '●')}  {STATUS_LABELS.get(status, status)}"
+
+
+def display_directory(cwd: str) -> str:
+    if not cwd:
+        return "待识别"
+    home = str(Path.home())
+    return "~" + cwd[len(home) :] if cwd == home or cwd.startswith(home + "/") else cwd
 
 
 def signal_text(activity: ActivityState | None) -> str:
