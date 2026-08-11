@@ -60,7 +60,7 @@ class TerminalManagerApp:
         self.activity_tracker = WindowActivityTracker()
         self.tab_activity_tracker = WindowActivityTracker()
         self.tab_groups: dict[str, TabGroup] = {}
-        self.tab_items: dict[str, tuple[WindowInfo, int]] = {}
+        self.tab_items: dict[str, tuple[TabGroup, int]] = {}
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
         self.refresh_job: str | None = None
@@ -329,7 +329,7 @@ class TerminalManagerApp:
                     child_status = child_activity.status if child_activity else "static"
                     child_title = tab.title or f"标签 {tab.index + 1}"
                     self.items[child_id] = (info, window)
-                    self.tab_items[child_id] = (window, tab.index)
+                    self.tab_items[child_id] = (group, tab.index)
                     self.tree.insert(
                         iid,
                         tk.END,
@@ -384,15 +384,17 @@ class TerminalManagerApp:
         iid, shell, window = selected
         tab_target = self.tab_items.get(iid)
         if tab_target:
-            window, tab_index = tab_target
-            if not select_tab(window, tab_index):
-                messagebox.showerror("无法切换标签", "GNOME Terminal 没有接受标签切换请求。", parent=self.root)
+            group, tab_index = tab_target
+            if not select_tab(group, tab_index):
+                self._tab_scan_result = None
+                self._request_tab_scan()
+                self.details.configure(text="标签列表刚刚发生变化，正在后台刷新；请再点击一次。")
                 return
         window_id = window.window_id if window else shell.window_id if shell else ""
         if not window_id:
             return
         try:
-            focus_window(window_id)
+            focus_window(window_id, shake=tab_target is None, sync=tab_target is None)
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
 

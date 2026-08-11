@@ -66,13 +66,17 @@ def active_window_id() -> str:
         raise X11Error("无法读取当前活动窗口") from exc
 
 
-def focus_window(window_id: str, *, shake: bool = True) -> None:
+def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> None:
     require_x11()
     wid = normalize_window_id(window_id)
     # wmctrl switches desktop when necessary; xdotool then raises and focuses it.
     subprocess.run(["wmctrl", "-i", "-a", wid], timeout=3, check=False)
     subprocess.run(["xdotool", "windowraise", wid], timeout=2, check=False)
-    subprocess.run(["xdotool", "windowactivate", "--sync", wid], timeout=3, check=False)
+    activate = ["xdotool", "windowactivate"]
+    if sync:
+        activate.append("--sync")
+    activate.append(wid)
+    subprocess.run(activate, timeout=3, check=False)
     if shake:
         shake_window(wid)
 

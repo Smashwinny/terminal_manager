@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .model import WindowInfo
 
@@ -19,6 +19,7 @@ class TerminalTab:
 class TabGroup:
     window_id: str
     tabs: tuple[TerminalTab, ...]
+    selector: object = field(repr=False, compare=False)
 
     @property
     def selected(self) -> TerminalTab:
@@ -64,29 +65,21 @@ def scan_tab_groups(windows: list[WindowInfo]) -> list[TabGroup]:
             )
         except (LookupError, NotImplementedError, RuntimeError):
             continue
-        groups.append(TabGroup(window.window_id, tabs))
+        groups.append(TabGroup(window.window_id, tabs, tab_list))
     return groups
 
 
-def select_tab(window: WindowInfo, index: int) -> bool:
-    """Select an existing GNOME Terminal tab without keyboard simulation."""
+def select_tab(group: TabGroup, index: int) -> bool:
+    """Select a cached GNOME Terminal tab without rescanning the desktop."""
     try:
-        import pyatspi
-        desktop = pyatspi.Registry.getDesktop(0)
-        app = next((item for item in desktop if item.name == "gnome-terminal-server"), None)
-        if app is None:
+        if not 0 <= index < len(group.tabs):
             return False
-        for frame in app:
-            matched = _match_window(frame, [window], pyatspi)
-            if matched is None:
-                continue
-            tab_list = _find_role(frame, pyatspi.ROLE_PAGE_TAB_LIST)
-            if tab_list is None or not 0 <= index < tab_list.childCount:
-                return False
-            return bool(tab_list.querySelection().selectChild(index))
-    except (ImportError, LookupError, NotImplementedError, RuntimeError):
+        selection = group.selector.querySelection()
+        if selection.isChildSelected(index):
+            return True
+        return bool(selection.selectChild(index))
+    except (LookupError, NotImplementedError, RuntimeError):
         return False
-    return False
 
 
 def _find_role(node: object, role: int, depth: int = 0) -> object | None:
