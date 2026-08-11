@@ -91,6 +91,7 @@ class TerminalManagerApp:
         self.thermal_enabled = tk.BooleanVar(value=True)
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
+        self._thermal_background_widgets = self._collect_thermal_background_widgets()
         self.window_highlighter = WindowHighlighter(root)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.refresh()
@@ -458,8 +459,8 @@ class TerminalManagerApp:
         values = {"total": total, "waiting": waiting, "running": running, "idle": idle, "unregistered": unregistered}
         for key, value in values.items():
             self.metric_values[key].configure(text=str(value))
-        self._update_metric_cards()
         self._apply_thermal_theme(mean_temperature(self.thermal_levels))
+        self._update_metric_cards()
         if error:
             self.details.configure(text=error)
         active_item = None
@@ -604,12 +605,17 @@ class TerminalManagerApp:
         self.refresh()
 
     def _update_metric_cards(self) -> None:
+        temperature = visual_temperature(mean_temperature(self.thermal_levels)) if self.thermal_enabled.get() else 0.0
+        surface = blend_color(PALETTE["surface"], HOT_ROW, temperature)
+        selected_surface = blend_color("#2c265c", HOT_ROW, temperature)
+        border = blend_color(PALETTE["border"], HOT_ROW, temperature)
+        accent = blend_color(PALETTE["accent"], HOT_ACCENT, temperature)
         for key, card in self.metric_cards.items():
             selected = key == self.metric_highlight
-            background = "#2c265c" if selected else PALETTE["surface"]
+            background = selected_surface if selected else surface
             card.configure(
                 background=background,
-                highlightbackground=PALETTE["accent"] if selected else PALETTE["border"],
+                highlightbackground=accent if selected else border,
                 highlightthickness=2 if selected else 1,
             )
             self._set_widget_background(card, background)
@@ -669,14 +675,56 @@ class TerminalManagerApp:
     def _apply_thermal_theme(self, project_temperature: float) -> None:
         enabled = self.thermal_enabled.get()
         temperature = visual_temperature(project_temperature) if enabled else 0.0
+        themed = {
+            key: blend_color(PALETTE[key], HOT_ROW, temperature)
+            for key in ("bg", "surface", "surface_2", "surface_3", "border")
+        }
         accent = blend_color(PALETTE["accent"], HOT_ACCENT, temperature)
         hover = blend_color(PALETTE["accent_hover"], "#ff5964", temperature)
+        self.root.configure(background=themed["bg"])
+        for widget, role in self._thermal_background_widgets:
+            try:
+                widget.configure(background=themed[role])
+            except tk.TclError:
+                pass
         self.logo.configure(background=accent)
         self.detail_accent.configure(background=accent)
         self._draw_thermal_toggle()
+        self.style.configure("App.TFrame", background=themed["bg"])
+        self.style.configure("Surface.TFrame", background=themed["surface"])
+        self.style.configure("Title.TLabel", background=themed["bg"])
+        self.style.configure("Subtitle.TLabel", background=themed["bg"])
         self.style.configure("Accent.TButton", background=accent)
         self.style.map("Accent.TButton", background=[("active", hover), ("pressed", accent)])
-        self.style.configure("Dark.Vertical.TScrollbar", background=accent)
+        self.style.configure("Ghost.TButton", background=themed["surface_2"])
+        self.style.map("Ghost.TButton", background=[("active", themed["surface_3"]), ("pressed", themed["border"])])
+        self.style.configure("Danger.TButton", background=themed["surface_2"])
+        self.style.configure(
+            "Shell.Treeview",
+            background=themed["surface"],
+            fieldbackground=themed["surface"],
+        )
+        self.style.configure("Shell.Treeview.Heading", background=themed["surface_3"])
+        self.style.map("Shell.Treeview.Heading", background=[("active", themed["surface_3"])])
+        self.style.configure("Dark.Vertical.TScrollbar", background=accent, troughcolor=themed["surface"])
+
+    def _collect_thermal_background_widgets(self) -> list[tuple[tk.Widget, str]]:
+        """Remember each Tk widget's cold palette role for repeatable theme updates."""
+        roles_by_color = {PALETTE[key]: key for key in ("bg", "surface", "surface_2", "surface_3")}
+        collected: list[tuple[tk.Widget, str]] = []
+        pending = [self.root]
+        while pending:
+            parent = pending.pop()
+            pending.extend(parent.winfo_children())
+            if isinstance(parent, ttk.Widget) or parent is self.root:
+                continue
+            try:
+                role = roles_by_color.get(str(parent.cget("background")))
+            except tk.TclError:
+                continue
+            if role is not None:
+                collected.append((parent, role))
+        return collected
 
     def _adapt_window_height(
         self,
