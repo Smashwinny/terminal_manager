@@ -32,6 +32,7 @@ class _History:
     samples: int = 1
     candidate_body: str = ""
     candidate_prefixes: set[str] = field(default_factory=set)
+    pending_static_since: float | None = None
 
 
 class WindowActivityTracker:
@@ -43,8 +44,9 @@ class WindowActivityTracker:
     affect this signal.
     """
 
-    def __init__(self, learning_threshold: int = 3) -> None:
+    def __init__(self, learning_threshold: int = 3, static_grace_seconds: float = 3.0) -> None:
         self.learning_threshold = max(2, learning_threshold)
+        self.static_grace_seconds = max(0.0, static_grace_seconds)
         self.learned_spinner_prefixes: set[str] = set()
         self._history: dict[str, _History] = {}
 
@@ -64,18 +66,28 @@ class WindowActivityTracker:
                 previous.samples += 1
                 self._learn_animation(previous, prefix, body)
                 status = self._classify(prefix)
+                display_prefix = prefix
+                if status == "static" and previous.status in ("active", "waiting"):
+                    if previous.pending_static_since is None:
+                        previous.pending_static_since = now
+                    if now - previous.pending_static_since < self.static_grace_seconds:
+                        status = previous.status
+                        display_prefix = previous.prefix
+                else:
+                    previous.pending_static_since = None
                 if status != previous.status:
                     previous.status = status
                     previous.status_since = now
-                previous.prefix = prefix
+                if display_prefix == prefix:
+                    previous.prefix = prefix
                 previous.body = body
 
             states[window.window_id] = ActivityState(
                 previous.status,
                 max(0.0, now - previous.status_since),
                 previous.samples,
-                prefix,
-                prefix in self.learned_spinner_prefixes,
+                previous.prefix,
+                previous.prefix in self.learned_spinner_prefixes,
             )
 
         for stale_id in set(self._history) - live_ids:

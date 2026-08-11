@@ -16,7 +16,7 @@ def test_split_status_prefix() -> None:
 
 @patch("terminal_manager.activity.time.monotonic", side_effect=[0.0, 2.0, 7.0])
 def test_known_codex_states(_clock) -> None:
-    tracker = WindowActivityTracker()
+    tracker = WindowActivityTracker(static_grace_seconds=0)
     assert tracker.update([window("⠹ hulk")])["0x0000002a"].status == "active"
     waiting = tracker.update([window("! hulk")])["0x0000002a"]
     assert waiting.status == "waiting"
@@ -42,3 +42,21 @@ def test_title_rename_is_not_learned_as_animation() -> None:
     state = tracker.update([window("C third-project")])["0x0000002a"]
     assert state.status == "static"
     assert not tracker.learned_spinner_prefixes
+
+
+@patch("terminal_manager.activity.time.monotonic", side_effect=[0.0, 1.0, 2.0])
+def test_blank_title_transition_does_not_flash_static(_clock) -> None:
+    tracker = WindowActivityTracker(static_grace_seconds=3.0)
+    assert tracker.update([window("⠹ hulk")])["0x0000002a"].status == "active"
+    transition = tracker.update([window("hulk")])["0x0000002a"]
+    assert transition.status == "active"
+    assert transition.prefix == "⠹"
+    assert tracker.update([window("[ ! ] Action Required | hulk")])["0x0000002a"].status == "waiting"
+
+
+@patch("terminal_manager.activity.time.monotonic", side_effect=[0.0, 1.0, 5.0])
+def test_real_static_state_is_applied_after_grace(_clock) -> None:
+    tracker = WindowActivityTracker(static_grace_seconds=3.0)
+    tracker.update([window("⠹ hulk")])
+    assert tracker.update([window("hulk")])["0x0000002a"].status == "active"
+    assert tracker.update([window("hulk")])["0x0000002a"].status == "static"

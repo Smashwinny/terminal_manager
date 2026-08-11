@@ -63,6 +63,7 @@ class TerminalManagerApp:
         self.tab_items: dict[str, tuple[TabGroup, int]] = {}
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
+        self._tab_group_misses: dict[str, int] = {}
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -400,7 +401,20 @@ class TerminalManagerApp:
 
     def _harvest_tab_scan(self) -> None:
         if self._tab_scan_result is not None:
-            self.tab_groups = {group.window_id: group for group in self._tab_scan_result}
+            scanned = {group.window_id: group for group in self._tab_scan_result}
+            scanned_ids = set(scanned)
+            live_windows = {window.window_id for window in self.windows}
+            for window_id, old_group in self.tab_groups.items():
+                if window_id in scanned or window_id not in live_windows:
+                    self._tab_group_misses.pop(window_id, None)
+                    continue
+                misses = self._tab_group_misses.get(window_id, 0) + 1
+                self._tab_group_misses[window_id] = misses
+                if misses < 2:
+                    scanned[window_id] = old_group
+            for window_id in scanned_ids:
+                self._tab_group_misses.pop(window_id, None)
+            self.tab_groups = scanned
             self._tab_scan_result = None
 
     def _request_tab_scan(self) -> None:
