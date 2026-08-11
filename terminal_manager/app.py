@@ -65,6 +65,7 @@ class TerminalManagerApp:
         self._tab_scan_thread: threading.Thread | None = None
         self._tab_group_misses: dict[str, int] = {}
         self._last_layout_rows: int | None = None
+        self._group_click_job: str | None = None
         self._drag_origin: tuple[int, int, int, int] | None = None
         self.metric_highlight: str | None = None
         self.focused_window_id: str | None = None
@@ -431,17 +432,10 @@ class TerminalManagerApp:
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
             bounds = self.tree.bbox(item_id, "name")
             if bounds and event.x - bounds[0] <= 38:
-                opened = not bool(self.tree.item(item_id, "open"))
-                self.tree.item(item_id, open=opened)
-                values = list(self.tree.item(item_id, "values"))
-                if values:
-                    label = values[0]
-                    if label.startswith(("▸  ", "▾  ")):
-                        label = label[3:]
-                    values[0] = f"{'▾' if opened else '▸'}  {label}"
-                    self.tree.item(item_id, values=values)
-                self._adapt_window_height(force=True)
+                self._schedule_group_click(lambda: self._toggle_group(item_id))
                 return
+            self._schedule_group_click(self.focus_selected)
+            return
         if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) == "cell":
             self.root.after_idle(self.focus_selected)
         elif item_id and self.tree.identify_column(event.x) == "#1" and self.tree.identify_region(event.x, event.y) == "cell":
@@ -450,9 +444,40 @@ class TerminalManagerApp:
     def _handle_tree_double_click(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
+            self._cancel_group_click()
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+            self.root.after_idle(self.focus_selected)
             return "break"
         self.focus_selected()
         return None
+
+    def _schedule_group_click(self, callback) -> None:
+        self._cancel_group_click()
+        self._group_click_job = self.root.after(240, lambda: self._run_group_click(callback))
+
+    def _run_group_click(self, callback) -> None:
+        self._group_click_job = None
+        callback()
+
+    def _cancel_group_click(self) -> None:
+        if self._group_click_job is not None:
+            self.root.after_cancel(self._group_click_job)
+            self._group_click_job = None
+
+    def _toggle_group(self, item_id: str) -> None:
+        if not self.tree.exists(item_id):
+            return
+        opened = not bool(self.tree.item(item_id, "open"))
+        self.tree.item(item_id, open=opened)
+        values = list(self.tree.item(item_id, "values"))
+        if values:
+            label = values[0]
+            if label.startswith(("▸  ", "▾  ")):
+                label = label[3:]
+            values[0] = f"{'▾' if opened else '▸'}  {label}"
+            self.tree.item(item_id, values=values)
+        self._adapt_window_height(force=True)
 
     def _bind_metric_card(self, widget: tk.Widget, key: str) -> None:
         widget.configure(cursor="hand2")
@@ -525,7 +550,8 @@ class TerminalManagerApp:
             return
         self._last_layout_rows = visible_rows
         desired_height = max(640, 455 + visible_rows * 43)
-        maximum_height = max(640, self.root.winfo_screenheight() - 70)
+        current_y = self.root.winfo_y()
+        maximum_height = max(520, self.root.winfo_screenheight() - current_y - 35)
         target_height = min(desired_height, maximum_height)
         overflow = desired_height > maximum_height
         self.tree.configure(height=visible_rows)
@@ -536,8 +562,7 @@ class TerminalManagerApp:
             self.scrollbar.pack_forget()
         width = max(1180, self.root.winfo_width())
         x = self.root.winfo_x()
-        y = min(self.root.winfo_y(), max(0, self.root.winfo_screenheight() - target_height - 35))
-        self.root.geometry(f"{width}x{target_height}+{x}+{y}")
+        self.root.geometry(f"{width}x{target_height}+{x}+{current_y}")
 
     def focus_selected(self) -> None:
         selected = self.selected()
