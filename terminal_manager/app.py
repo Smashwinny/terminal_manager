@@ -79,6 +79,7 @@ class TerminalManagerApp:
         self._tab_group_misses: dict[str, int] = {}
         self._last_layout_rows: int | None = None
         self._group_click_job: str | None = None
+        self._suppress_group_release = False
         self.metric_highlight: str | None = None
         self.focused_item_id: str | None = None
         self._observed_active_item: str | None = None
@@ -534,6 +535,9 @@ class TerminalManagerApp:
 
     def _handle_tree_click(self, event: tk.Event) -> None:
         item_id = self.tree.identify_row(event.y)
+        if self._suppress_group_release:
+            self._suppress_group_release = False
+            return
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
             bounds = self.tree.bbox(item_id, "name")
             if bounds and event.x - bounds[0] <= 38:
@@ -550,6 +554,7 @@ class TerminalManagerApp:
         item_id = self.tree.identify_row(event.y)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
             self._cancel_group_click()
+            self._suppress_group_release = True
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
             self.root.after_idle(self.focus_selected)
