@@ -11,6 +11,7 @@ from .discovery import discover_shell_candidates, suggest_candidate
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .monitor import refresh as inspect_shell
 from .store import load_shells, remove_shell, save_shell
+from .terminal_preview import can_preview_tty
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
@@ -398,7 +399,11 @@ class TerminalManagerApp:
             messagebox.showerror("窗口不存在", "当前记录对应的终端窗口已经关闭。", parent=self.root)
             return
         assigned = {item.shell_pid for item in load_shells() if item.shell_pid > 0 and (not shell or item.shell_id != shell.shell_id)}
-        candidates = [item for item in discover_shell_candidates(window.pid) if item.shell_pid not in assigned]
+        candidates = [
+            item
+            for item in discover_shell_candidates(window.pid)
+            if item.shell_pid not in assigned and can_preview_tty(item.tty)
+        ]
         selected_index = 0
         if shell and shell.shell_pid > 0:
             match = next((index for index, item in enumerate(candidates, start=1) if item.shell_pid == shell.shell_pid), None)
