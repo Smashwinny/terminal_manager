@@ -9,6 +9,7 @@ Terminal Manager 不接管 PTY、不迁移 Shell，也不会终止现有任务�
 - 自动发现 GNOME Terminal、Konsole、Tilix、Terminator、Kitty、Alacritty、WezTerm、XTerm、Wave 等 X11 终端窗口；
 - 双击或按 Enter 聚焦、抬升对应终端窗口，并以约 0.3 秒的小幅快速摆动明确提示目标；
 - 在桌面点击某个终端时，管理页会自动选中并滚动到对应记录，不抢夺输入焦点；
+- 自动发现 GNOME Terminal 同一窗口中的隐藏标签页；多标签窗口可通过箭头展开，单击子项即可切换标签并聚焦窗口；
 - 给每个终端窗口设置只保存在管理器中的用途名称；
 - 显示 Codex 标题状态信号和当前状态持续时间；
 - 自动排序：等待用户输入最前，正在输出其次，静态窗口最后；各组按进入状态的时间排序；
@@ -36,12 +37,13 @@ Terminal Manager 不接管 PTY、不迁移 Shell，也不会终止现有任务�
 
 - Linux X11 桌面（首版暂不支持 Wayland）；
 - Python 3.9+ 和 Tk；
+- GNOME Terminal 隐藏标签管理需要系统的 Python AT-SPI（Ubuntu 桌面通常已预装 `python3-pyatspi`）；
 - `wmctrl`、`xdotool`。
 
 Ubuntu/Debian 安装依赖：
 
 ```bash
-sudo apt install python3-tk wmctrl xdotool
+sudo apt install python3-tk python3-pyatspi wmctrl xdotool
 ```
 
 ## 安装
@@ -103,7 +105,7 @@ python3 -m pytest
 
 ## 已知限制
 
-- 一个终端窗口包含多个标签页时，状态反映当前可绘制的活动标签页，无法同时判断隐藏标签页。
+- GNOME Terminal 的隐藏标签可展开、读取标题、判断标题状态和切换；其他终端模拟器是否支持隐藏标签取决于后续适配。
 - Wayland 默认禁止普通应用任意聚焦其他窗口，需要后续实现 GNOME/KDE 专用适配器。
 - 状态监测依赖 Agent 设置终端标题；普通 Shell 和没有标题集成的 Agent 会显示静态。
 

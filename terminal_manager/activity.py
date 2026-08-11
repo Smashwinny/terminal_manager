@@ -11,6 +11,7 @@ from .model import WindowInfo
 # require an application release as long as it keeps the same title protocol.
 CODEX_SPINNER_PREFIXES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 WAITING_PREFIXES = frozenset(("!", "！", "❗", "⚠"))
+WAITING_TITLE_MARKERS = ("[ ! ]", "[！]", "[!]", "❗", "⚠")
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,12 @@ class WindowActivityTracker:
 
 def split_status_prefix(title: str) -> tuple[str, str]:
     """Return a possible one-character status prefix and the stable title body."""
-    first, separator, body = title.strip().partition(" ")
+    cleaned = title.strip()
+    for marker in WAITING_TITLE_MARKERS:
+        if cleaned.startswith(marker):
+            body = cleaned[len(marker) :].lstrip()
+            return "!", body or cleaned
+    first, separator, body = cleaned.partition(" ")
     if separator and len(first) == 1 and body:
         return first, body
-    return "", title.strip()
+    return "", cleaned

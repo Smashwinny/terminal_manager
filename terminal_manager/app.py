@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
+import threading
 import uuid
 from tkinter import messagebox, ttk
 
@@ -10,6 +11,7 @@ from .activity import ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .store import load_shells, remove_shell, save_shell
+from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
@@ -56,6 +58,11 @@ class TerminalManagerApp:
         self.windows: list[WindowInfo] = []
         self.activities: dict[str, ActivityState] = {}
         self.activity_tracker = WindowActivityTracker()
+        self.tab_activity_tracker = WindowActivityTracker()
+        self.tab_groups: dict[str, TabGroup] = {}
+        self.tab_items: dict[str, tuple[WindowInfo, int]] = {}
+        self._tab_scan_result: list[TabGroup] | None = None
+        self._tab_scan_thread: threading.Thread | None = None
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -155,11 +162,13 @@ class TerminalManagerApp:
         self.tree = ttk.Treeview(
             table,
             columns=columns,
-            show="headings",
+            show="tree headings",
             selectmode="browse",
             style="Shell.Treeview",
             height=5,
         )
+        self.tree.heading("#0", text="")
+        self.tree.column("#0", width=34, minwidth=34, stretch=False)
         labels = {
             "name": "名称",
             "status": "状态",
@@ -180,6 +189,7 @@ class TerminalManagerApp:
         self.tree.tag_configure("even", background=PALETTE["surface"])
         self.tree.tag_configure("odd", background=PALETTE["surface_2"])
         self.tree.bind("<Double-1>", lambda _event: self.focus_selected())
+        self.tree.bind("<ButtonRelease-1>", self._handle_tree_click)
         self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_details())
         self.tree.bind("<Return>", lambda _event: self.focus_selected())
 
@@ -241,11 +251,18 @@ class TerminalManagerApp:
             self.root.after_cancel(self.refresh_job)
             self.refresh_job = None
         selected_shell_id = None
+        expanded_windows = {
+            item.removeprefix("group:")
+            for item in self.tree.get_children()
+            if item.startswith("group:") and self.tree.item(item, "open")
+        }
         selection = self.tree.selection()
         if selection:
             selected_shell_id = selection[0]
         try:
             self.windows = list_windows()
+            self._harvest_tab_scan()
+            self._request_tab_scan()
             self.activities = self.activity_tracker.update(self.windows)
             error = ""
         except X11Error as exc:
@@ -257,6 +274,7 @@ class TerminalManagerApp:
 
         self.tree.delete(*self.tree.get_children())
         self.items.clear()
+        self.tab_items.clear()
         query = self.search_var.get().strip().lower()
         row_index = 0
         records_by_window = {info.window_id: info for info in shells}
@@ -275,12 +293,22 @@ class TerminalManagerApp:
                 rows.append((info, None, None, "ended", info.name))
 
         rows.sort(key=lambda row: activity_sort_key(row[2], row[3], row[4]))
+        tab_signals = []
+        for group in self.tab_groups.values():
+            window = find_window(group.window_id, self.windows)
+            if not window:
+                continue
+            for tab in group.tabs:
+                tab_signals.append(tab_window_signal(window, tab))
+        tab_activities = self.tab_activity_tracker.update(tab_signals)
+
         for info, window, activity, status, name in rows:
             window_title = window.title if window else f"{info.window_id}（未找到）" if info else "窗口不存在"
             searchable = " ".join((name, status, STATUS_LABELS.get(status, ""), window_title)).lower()
             if query and query not in searchable:
                 continue
-            iid = f"shell:{info.shell_id}" if info else f"window:{window.window_id}"
+            group = self.tab_groups.get(window.window_id) if window else None
+            iid = f"group:{window.window_id}" if group else f"shell:{info.shell_id}" if info else f"window:{window.window_id}"
             self.items[iid] = (info, window)
             registered_prefix = "" if info else "未登记 · "
             self.tree.insert(
@@ -289,8 +317,27 @@ class TerminalManagerApp:
                 iid=iid,
                 values=(name, status_text(status), signal_text(activity), age_text(activity), registered_prefix + window_title),
                 tags=(status, "even" if row_index % 2 == 0 else "odd"),
+                open=bool(window and window.window_id in expanded_windows),
             )
             row_index += 1
+            if group and window:
+                for tab in group.tabs:
+                    if tab.selected:
+                        continue
+                    child_id = f"tab:{window.window_id}:{tab.index}"
+                    child_activity = tab_activities.get(tab.signal_id(window.window_id))
+                    child_status = child_activity.status if child_activity else "static"
+                    child_title = tab.title or f"标签 {tab.index + 1}"
+                    self.items[child_id] = (info, window)
+                    self.tab_items[child_id] = (window, tab.index)
+                    self.tree.insert(
+                        iid,
+                        tk.END,
+                        iid=child_id,
+                        text="",
+                        values=(f"↳ {child_title}", status_text(child_status), signal_text(child_activity), age_text(child_activity), "隐藏标签"),
+                        tags=(child_status,),
+                    )
 
         registered_window_ids = {info.window_id for info in shells}
         unregistered = sum(1 for window in self.windows if window.window_id not in registered_window_ids)
@@ -325,11 +372,22 @@ class TerminalManagerApp:
         shell, window = self.items[iid]
         return iid, shell, window
 
+    def _handle_tree_click(self, event: tk.Event) -> None:
+        item_id = self.tree.identify_row(event.y)
+        if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) in ("tree", "cell"):
+            self.root.after_idle(self.focus_selected)
+
     def focus_selected(self) -> None:
         selected = self.selected()
         if not selected:
             return
-        _iid, shell, window = selected
+        iid, shell, window = selected
+        tab_target = self.tab_items.get(iid)
+        if tab_target:
+            window, tab_index = tab_target
+            if not select_tab(window, tab_index):
+                messagebox.showerror("无法切换标签", "GNOME Terminal 没有接受标签切换请求。", parent=self.root)
+                return
         window_id = window.window_id if window else shell.window_id if shell else ""
         if not window_id:
             return
@@ -338,12 +396,28 @@ class TerminalManagerApp:
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
 
+    def _harvest_tab_scan(self) -> None:
+        if self._tab_scan_result is not None:
+            self.tab_groups = {group.window_id: group for group in self._tab_scan_result}
+            self._tab_scan_result = None
+
+    def _request_tab_scan(self) -> None:
+        if self._tab_scan_thread and self._tab_scan_thread.is_alive():
+            return
+        windows = list(self.windows)
+
+        def scan() -> None:
+            self._tab_scan_result = scan_tab_groups(windows)
+
+        self._tab_scan_thread = threading.Thread(target=scan, daemon=True, name="terminal-tab-scan")
+        self._tab_scan_thread.start()
+
     def update_details(self) -> None:
         selected = self.selected()
         if not selected:
             self.details.configure(text="选择一个 Shell 查看说明")
             return
-        _iid, shell, window = selected
+        iid, shell, window = selected
         window_id = window.window_id if window else shell.window_id if shell else ""
         activity = self.activities.get(window_id)
         if activity:
@@ -356,6 +430,8 @@ class TerminalManagerApp:
             text = "暂时无法取得该窗口的画面活动；窗口可能已经关闭。"
         if not window:
             text += "\n当前窗口 ID 已不存在；Shell 可能结束或窗口已经关闭。"
+        elif iid in self.tab_items:
+            text += "\n这是同一终端窗口中的隐藏标签；单击即可切换到该标签。"
         self.details.configure(text=text)
 
     def rename_selected(self) -> None:
@@ -373,7 +449,10 @@ class TerminalManagerApp:
         if not selected:
             messagebox.showinfo("登记窗口", "请先在列表中选择一个终端窗口。", parent=self.root)
             return
-        _iid, shell, window = selected
+        iid, shell, window = selected
+        if iid in self.tab_items:
+            messagebox.showinfo("隐藏标签", "隐藏标签暂时沿用所属窗口的管理记录。", parent=self.root)
+            return
         if shell:
             self.edit_record(shell, window)
             return
@@ -492,6 +571,21 @@ def item_id_for_window(
         if linked_window_id == window_id:
             return item_id
     return None
+
+
+def tab_window_signal(window: WindowInfo, tab: TerminalTab) -> WindowInfo:
+    return WindowInfo(
+        tab.signal_id(window.window_id),
+        window.desktop,
+        window.pid,
+        window.x,
+        window.y,
+        window.width,
+        window.height,
+        window.wm_class,
+        window.host,
+        tab.title,
+    )
 
 
 def main() -> None:

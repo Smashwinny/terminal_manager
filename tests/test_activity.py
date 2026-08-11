@@ -10,6 +10,7 @@ def window(title: str) -> WindowInfo:
 
 def test_split_status_prefix() -> None:
     assert split_status_prefix("⠹ hulk") == ("⠹", "hulk")
+    assert split_status_prefix("[ ! ] Action Required | hulk") == ("!", "Action Required | hulk")
     assert split_status_prefix("mobile ledger") == ("", "mobile ledger")
 
 
