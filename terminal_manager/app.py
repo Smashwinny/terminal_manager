@@ -9,10 +9,11 @@ from tkinter import messagebox, ttk
 from . import __version__
 from .activity import ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
-from .highlight import WindowHighlighter
+from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
-from .store import load_shells, remove_shell, save_shell
+from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
+from .tty_probe import probe_visible_tty
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
@@ -60,6 +61,7 @@ class TerminalManagerApp:
         self.activity_tracker = WindowActivityTracker()
         self.tab_activity_tracker = WindowActivityTracker()
         self.tab_groups: dict[str, TabGroup] = {}
+        self.tty_bindings = load_tty_bindings()
         self.tab_items: dict[str, tuple[TabGroup, int]] = {}
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
@@ -604,10 +606,35 @@ class TerminalManagerApp:
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
             return
-        if shell and shell.tty and tab_target is None:
-            self.window_highlighter.flash(shell.tty)
+        group = self.tab_groups.get(window_id)
+        if tab_target:
+            tab_key = f"tab:{tab_target[1]}"
+        elif group:
+            tab_key = f"tab:{group.selected.index}"
+        else:
+            tab_key = "main"
+
+        tty = self.tty_bindings.get(window_id, {}).get(tab_key, "")
+        if not can_highlight_tty(tty):
+            tty = ""
+        if not tty and not group and shell and can_highlight_tty(shell.tty):
+            tty = shell.tty
+            self._remember_tty(window_id, tab_key, tty)
+        if not tty:
+            self.details.configure(text="首次识别该标签，正在建立高亮关联…")
+            self.root.update_idletasks()
+            tty = probe_visible_tty(window_id) or ""
+            if tty:
+                self._remember_tty(window_id, tab_key, tty)
+        if tty:
+            self.window_highlighter.flash(tty)
         else:
             self.window_highlighter.hide()
+            self.details.configure(text="未能自动识别该标签的 TTY；聚焦和震动仍然可用。")
+
+    def _remember_tty(self, window_id: str, tab_key: str, tty: str) -> None:
+        self.tty_bindings.setdefault(window_id, {})[tab_key] = tty
+        save_tty_binding(window_id, tab_key, tty)
 
     def _apply_focused_shell_highlight(self) -> None:
         for item_id, (shell, window) in self.items.items():

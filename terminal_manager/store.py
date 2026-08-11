@@ -13,6 +13,34 @@ def state_dir() -> Path:
     return root / "terminal-manager" / "shells"
 
 
+def tty_bindings_path() -> Path:
+    return state_dir().parent / "tty-bindings.json"
+
+
+def load_tty_bindings() -> dict[str, dict[str, str]]:
+    try:
+        data = json.loads(tty_bindings_path().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(window_id): {str(key): str(tty) for key, tty in bindings.items()}
+            for window_id, bindings in data.items()
+            if isinstance(bindings, dict)
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def save_tty_binding(window_id: str, tab_key: str, tty: str) -> None:
+    target = tty_bindings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    bindings = load_tty_bindings()
+    bindings.setdefault(window_id, {})[tab_key] = tty
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(bindings, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(target)
+
+
 def shell_path(shell_id: str) -> Path:
     return state_dir() / f"{shell_id}.json"
 
@@ -46,4 +74,3 @@ def remove_shell(shell_id: str) -> bool:
         return True
     except FileNotFoundError:
         return False
-

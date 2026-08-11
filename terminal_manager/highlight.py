@@ -14,19 +14,23 @@ def can_highlight_tty(tty: str) -> bool:
     return tty.startswith("/dev/pts/") and os.path.exists(tty) and os.access(tty, os.W_OK)
 
 
-def set_tty_highlight(tty: str, enabled: bool) -> bool:
+def write_tty_sequence(tty: str, sequence: bytes) -> bool:
     if not can_highlight_tty(tty):
         return False
     flags = os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0)
     try:
         fd = os.open(tty, flags)
         try:
-            os.write(fd, HIGHLIGHT_SEQUENCE if enabled else RESET_SEQUENCE)
+            os.write(fd, sequence)
         finally:
             os.close(fd)
         return True
     except OSError:
         return False
+
+
+def set_tty_highlight(tty: str, enabled: bool) -> bool:
+    return write_tty_sequence(tty, HIGHLIGHT_SEQUENCE if enabled else RESET_SEQUENCE)
 
 
 class WindowHighlighter:

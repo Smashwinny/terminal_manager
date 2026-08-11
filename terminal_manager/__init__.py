@@ -1,3 +1,3 @@
 """Terminal Manager package."""
 
-__version__ = "0.14.3"
+__version__ = "0.15.0"
