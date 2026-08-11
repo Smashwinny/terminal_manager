@@ -12,6 +12,7 @@ from .activity import ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
+from .single_instance import SingleInstance, activate_existing
 from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
@@ -1060,6 +1061,10 @@ def tab_window_signal(window: WindowInfo, tab: TerminalTab) -> WindowInfo:
 
 
 def main() -> None:
+    instance = SingleInstance()
+    if not instance.acquire():
+        activate_existing()
+        return
     root = tk.Tk()
     try:
         TerminalManagerApp(root)
@@ -1067,7 +1072,10 @@ def main() -> None:
         root.withdraw()
         messagebox.showerror("Terminal Manager 无法启动", str(exc))
         raise SystemExit(1) from exc
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":
