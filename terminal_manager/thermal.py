@@ -9,6 +9,7 @@ HEAT_SECONDS = 10 * 60.0
 COOL_SECONDS = 6 * 60.0
 HOT_ROW = "#d92f45"
 HOT_ACCENT = "#ef3340"
+MAX_SAMPLE_GAP_SECONDS = 10.0
 
 
 @dataclass
@@ -20,8 +21,9 @@ class _Temperature:
 class ThermalTracker:
     """Accumulate per-item heat from activity without changing classification."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_sample_gap_seconds: float = MAX_SAMPLE_GAP_SECONDS) -> None:
         self._items: dict[str, _Temperature] = {}
+        self.max_sample_gap_seconds = max(0.0, max_sample_gap_seconds)
 
     def update(self, statuses: dict[str, str], *, now: float | None = None) -> dict[str, float]:
         timestamp = time.monotonic() if now is None else now
@@ -30,7 +32,10 @@ class ThermalTracker:
             if item is None:
                 item = _Temperature(0.0, timestamp)
                 self._items[item_id] = item
-            elapsed = max(0.0, timestamp - item.updated_at)
+            # Long GUI stalls (for example a modal edit dialog or desktop
+            # suspension) are unobserved time, not evidence of continuous
+            # output. Cap one sample so heat cannot jump to red at once.
+            elapsed = min(self.max_sample_gap_seconds, max(0.0, timestamp - item.updated_at))
             if status == "active":
                 item.value = min(1.0, item.value + elapsed / HEAT_SECONDS)
             elif status == "static":

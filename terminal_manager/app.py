@@ -326,15 +326,18 @@ class TerminalManagerApp:
         if selection:
             selected_shell_id = selection[0]
         try:
-            self.windows = list_windows()
+            scanned_windows = list_windows()
+            scanned_activities = self.activity_tracker.update(scanned_windows)
+            self.windows = scanned_windows
+            self.activities = scanned_activities
             self._harvest_tab_scan()
             self._request_tab_scan()
-            self.activities = self.activity_tracker.update(self.windows)
             error = ""
         except X11Error as exc:
-            self.windows = []
-            self.activities = {}
-            error = str(exc)
+            # A transient wmctrl/xdotool failure must not turn every registered
+            # task into an ended (red) row. Keep the last known-good snapshot
+            # and try again on the next refresh.
+            error = f"{exc}；已保留上一次有效状态，正在重试。"
 
         shells = load_shells()
         tty_cwds = terminal_tty_cwds()
