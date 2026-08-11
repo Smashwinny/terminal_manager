@@ -8,6 +8,9 @@ from pathlib import Path
 from .model import ShellInfo
 
 
+TTY_BINDINGS_VERSION = 2
+
+
 def state_dir() -> Path:
     root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     return root / "terminal-manager" / "shells"
@@ -20,6 +23,9 @@ def tty_bindings_path() -> Path:
 def load_tty_bindings() -> dict[str, dict[str, str]]:
     try:
         data = json.loads(tty_bindings_path().read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("version") != TTY_BINDINGS_VERSION:
+            return {}
+        data = data.get("bindings", {})
         if not isinstance(data, dict):
             return {}
         return {
@@ -37,7 +43,8 @@ def save_tty_binding(window_id: str, tab_key: str, tty: str) -> None:
     bindings = load_tty_bindings()
     bindings.setdefault(window_id, {})[tab_key] = tty
     temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(bindings, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = {"version": TTY_BINDINGS_VERSION, "bindings": bindings}
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(target)
 
 

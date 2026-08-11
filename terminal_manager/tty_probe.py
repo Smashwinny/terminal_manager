@@ -81,7 +81,10 @@ def _window_has_probe_colour(window_id: str) -> bool:
         for offset in range(0, len(pixels) - 2, 3)
         if pixels[offset] > 225 and pixels[offset + 1] < 35 and pixels[offset + 2] > 220
     )
-    return matches >= 100
+    # Transparent or overlapping terminals can leak a small amount of the
+    # probe colour from another window. A real terminal background covers well
+    # over 1,500 of the 4,096 samples in practice; require a conservative 900.
+    return matches >= 900
 
 
 def _tty_number(tty: str) -> tuple[int, str]:

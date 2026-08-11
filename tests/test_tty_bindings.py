@@ -1,4 +1,4 @@
-from terminal_manager.store import load_tty_bindings, save_tty_binding
+from terminal_manager.store import load_tty_bindings, save_tty_binding, tty_bindings_path
 from terminal_manager.tty_probe import _tty_number
 
 
@@ -19,3 +19,12 @@ def test_ttys_sort_numerically() -> None:
         "/dev/pts/2",
         "/dev/pts/10",
     ]
+
+
+def test_legacy_unverified_bindings_are_ignored(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = tty_bindings_path()
+    path.parent.mkdir(parents=True)
+    path.write_text('{"0x00000001": {"main": "/dev/pts/8"}}', encoding="utf-8")
+
+    assert load_tty_bindings() == {}

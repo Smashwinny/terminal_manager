@@ -617,9 +617,6 @@ class TerminalManagerApp:
         tty = self.tty_bindings.get(window_id, {}).get(tab_key, "")
         if not can_highlight_tty(tty):
             tty = ""
-        if not tty and not group and shell and can_highlight_tty(shell.tty):
-            tty = shell.tty
-            self._remember_tty(window_id, tab_key, tty)
         if not tty:
             self.details.configure(text="首次识别该标签，正在建立高亮关联…")
             self.root.update_idletasks()
