@@ -13,7 +13,7 @@ from .highlight import WindowHighlighter
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .store import load_shells, remove_shell, save_shell
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
-from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows, window_geometry
+from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
 STATUS_COLORS = {
@@ -54,7 +54,6 @@ class TerminalManagerApp:
         self.root.geometry("1180x720")
         self.root.minsize(860, 520)
         self.root.configure(background=PALETTE["bg"])
-        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
         self.activities: dict[str, ActivityState] = {}
@@ -74,7 +73,12 @@ class TerminalManagerApp:
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
         self.window_highlighter = WindowHighlighter(root)
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.refresh()
+
+    def _close(self) -> None:
+        self.window_highlighter.hide()
+        self.root.destroy()
 
     def _build_ui(self) -> None:
         self._configure_styles()
@@ -559,9 +563,9 @@ class TerminalManagerApp:
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
             return
-        try:
-            self.window_highlighter.flash(window_geometry(window_id))
-        except X11Error:
+        if shell and shell.tty and tab_target is None:
+            self.window_highlighter.flash(shell.tty)
+        else:
             self.window_highlighter.hide()
 
     def _apply_focused_shell_highlight(self) -> None:
@@ -684,14 +688,10 @@ class TerminalManagerApp:
             )
         shell.name = name
         shell.window_id = window.window_id
-        shell.shell_pid = 0
-        shell.tty = ""
         shell.status = "unbound"
         shell.status_detail = "Codex 状态由终端窗口标题识别"
         shell.command = ""
         shell.cwd = ""
-        shell.foreground_pid = None
-        shell.process_state = ""
         shell.last_seen = now
         save_shell(shell)
         self.refresh()

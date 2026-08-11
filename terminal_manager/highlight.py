@@ -1,42 +1,55 @@
 from __future__ import annotations
 
+import os
 import tkinter as tk
 
 
-PURPLE = "#7c6cff"
+# This is the original, user-confirmed association-preview colour. OSC 11
+# changes only VTE's background; text, cursor, geometry and input stay intact.
+HIGHLIGHT_SEQUENCE = b"\x1b]11;#3b3275\x07\x1b]12;#ffffff\x07"
+RESET_SEQUENCE = b"\x1b]111\x07\x1b]112\x07"
 
 
-def flash_geometry(geometry: tuple[int, int, int, int]) -> str:
-    x, y, width, height = geometry
-    return f"{width}x{height}+{x}+{y}"
+def can_highlight_tty(tty: str) -> bool:
+    return tty.startswith("/dev/pts/") and os.path.exists(tty) and os.access(tty, os.W_OK)
+
+
+def set_tty_highlight(tty: str, enabled: bool) -> bool:
+    if not can_highlight_tty(tty):
+        return False
+    flags = os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0)
+    try:
+        fd = os.open(tty, flags)
+        try:
+            os.write(fd, HIGHLIGHT_SEQUENCE if enabled else RESET_SEQUENCE)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
 
 
 class WindowHighlighter:
-    """Briefly tint a terminal purple without changing its profile or TTY."""
+    """Temporarily change a confirmed terminal TTY's native background."""
 
-    def __init__(self, root: tk.Tk, duration_ms: int = 720) -> None:
+    def __init__(self, root: tk.Tk, duration_ms: int = 900) -> None:
         self.root = root
         self.duration_ms = duration_ms
-        self.hide_job: str | None = None
-        self.overlay = tk.Toplevel(root)
-        self.overlay.withdraw()
-        self.overlay.overrideredirect(True)
-        self.overlay.configure(background=PURPLE, cursor="arrow")
-        self.overlay.attributes("-topmost", True)
-        try:
-            self.overlay.attributes("-alpha", 0.42)
-            self.overlay.attributes("-type", "splash")
-        except tk.TclError:
-            pass
+        self.tty: str | None = None
+        self.reset_job: str | None = None
 
-    def flash(self, geometry: tuple[int, int, int, int]) -> None:
-        if self.hide_job is not None:
-            self.root.after_cancel(self.hide_job)
-        self.overlay.geometry(flash_geometry(geometry))
-        self.overlay.deiconify()
-        self.overlay.lift()
-        self.hide_job = self.root.after(self.duration_ms, self.hide)
+    def flash(self, tty: str) -> bool:
+        self.hide()
+        if not set_tty_highlight(tty, True):
+            return False
+        self.tty = tty
+        self.reset_job = self.root.after(self.duration_ms, self.hide)
+        return True
 
     def hide(self) -> None:
-        self.hide_job = None
-        self.overlay.withdraw()
+        if self.reset_job is not None:
+            self.root.after_cancel(self.reset_job)
+            self.reset_job = None
+        if self.tty:
+            set_tty_highlight(self.tty, False)
+            self.tty = None
