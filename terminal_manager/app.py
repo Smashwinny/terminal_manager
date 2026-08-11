@@ -64,6 +64,8 @@ class TerminalManagerApp:
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
         self._tab_group_misses: dict[str, int] = {}
+        self._last_layout_rows: int | None = None
+        self._drag_origin: tuple[int, int, int, int] | None = None
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -98,6 +100,22 @@ class TerminalManagerApp:
         header_actions.pack(side=tk.RIGHT)
         ttk.Button(header_actions, text="登记窗口", style="Ghost.TButton", command=self.register_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
+
+        drag_handle = tk.Label(
+            header,
+            text="⠿  拖动窗口",
+            foreground=PALETTE["muted"],
+            background=PALETTE["surface"],
+            activeforeground=PALETTE["text"],
+            activebackground=PALETTE["surface_2"],
+            cursor="fleur",
+            padx=12,
+            pady=8,
+            font=("Noto Sans CJK SC", 9),
+        )
+        drag_handle.pack(side=tk.RIGHT, padx=(0, 10))
+        drag_handle.bind("<ButtonPress-1>", self._start_window_drag)
+        drag_handle.bind("<B1-Motion>", self._drag_window)
 
         dashboard = ttk.Frame(container, style="App.TFrame")
         dashboard.pack(fill=tk.X, pady=(0, 16))
@@ -179,10 +197,10 @@ class TerminalManagerApp:
         for key in columns:
             self.tree.heading(key, text=labels[key])
             self.tree.column(key, width=widths[key], minwidth=70, stretch=key == "window")
-        scrollbar = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.tree.yview, style="Dark.Vertical.TScrollbar")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.tree.yview, style="Dark.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=self.scrollbar.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         for status, color in STATUS_COLORS.items():
             self.tree.tag_configure(status, foreground=color)
         self.tree.tag_configure("even", background=PALETTE["surface"])
@@ -244,7 +262,15 @@ class TerminalManagerApp:
         style.configure("Shell.Treeview.Heading", background=PALETTE["surface_3"], foreground=PALETTE["muted"], borderwidth=0, relief="flat", padding=(10, 10), font=("Noto Sans CJK SC", 9, "bold"))
         style.map("Shell.Treeview", background=[("selected", "#332d68")], foreground=[("selected", "#ffffff")])
         style.map("Shell.Treeview.Heading", background=[("active", PALETTE["surface_3"])])
-        style.configure("Dark.Vertical.TScrollbar", background=PALETTE["surface_3"], troughcolor=PALETTE["surface"], borderwidth=0, arrowcolor=PALETTE["muted"])
+        style.configure(
+            "Dark.Vertical.TScrollbar",
+            background=PALETTE["accent"],
+            troughcolor=PALETTE["surface"],
+            borderwidth=0,
+            relief="flat",
+            arrowsize=0,
+            width=8,
+        )
 
     def refresh(self) -> None:
         if self.refresh_job is not None:
@@ -374,6 +400,7 @@ class TerminalManagerApp:
             if active_item:
                 self.tree.see(item_to_select)
         self.update_details()
+        self._adapt_window_height()
         self.refresh_job = self.root.after(2000, self.refresh)
 
     def selected(self) -> tuple[str, ShellInfo | None, WindowInfo | None] | None:
@@ -398,6 +425,7 @@ class TerminalManagerApp:
                         label = label[3:]
                     values[0] = f"{'▾' if opened else '▸'}  {label}"
                     self.tree.item(item_id, values=values)
+                self._adapt_window_height(force=True)
                 return
         if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) == "cell":
             self.root.after_idle(self.focus_selected)
@@ -408,6 +436,42 @@ class TerminalManagerApp:
             return "break"
         self.focus_selected()
         return None
+
+    def _start_window_drag(self, event: tk.Event) -> None:
+        self._drag_origin = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
+
+    def _drag_window(self, event: tk.Event) -> None:
+        if self._drag_origin is None:
+            return
+        start_x, start_y, window_x, window_y = self._drag_origin
+        x = window_x + event.x_root - start_x
+        y = window_y + event.y_root - start_y
+        self.root.geometry(f"+{x}+{y}")
+
+    def _adapt_window_height(self, *, force: bool = False) -> None:
+        visible_rows = 0
+        for item_id in self.tree.get_children():
+            visible_rows += 1
+            if self.tree.item(item_id, "open"):
+                visible_rows += len(self.tree.get_children(item_id))
+        visible_rows = max(1, visible_rows)
+        if not force and visible_rows == self._last_layout_rows:
+            return
+        self._last_layout_rows = visible_rows
+        desired_height = max(640, 455 + visible_rows * 43)
+        maximum_height = max(640, self.root.winfo_screenheight() - 70)
+        target_height = min(desired_height, maximum_height)
+        overflow = desired_height > maximum_height
+        self.tree.configure(height=visible_rows)
+        if overflow:
+            if not self.scrollbar.winfo_ismapped():
+                self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        elif self.scrollbar.winfo_ismapped():
+            self.scrollbar.pack_forget()
+        width = max(1180, self.root.winfo_width())
+        x = self.root.winfo_x()
+        y = min(self.root.winfo_y(), max(0, self.root.winfo_screenheight() - target_height - 35))
+        self.root.geometry(f"{width}x{target_height}+{x}+{y}")
 
     def focus_selected(self) -> None:
         selected = self.selected()
