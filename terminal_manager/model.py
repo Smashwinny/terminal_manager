@@ -67,6 +67,9 @@ STATUS_LABELS = {
     "ended": "已结束",
     "unknown": "未知",
     "unbound": "已记录",
+    "observing": "正在采样",
+    "active": "正在输出",
+    "static": "静态/空闲",
     "window": "未注册",
 }
 

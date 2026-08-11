@@ -6,12 +6,10 @@ import uuid
 from tkinter import messagebox, ttk
 
 from . import __version__
+from .activity import ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
-from .discovery import discover_shell_candidates, suggest_candidate
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
-from .monitor import refresh as inspect_shell
 from .store import load_shells, remove_shell, save_shell
-from .terminal_preview import can_preview_tty
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
@@ -21,6 +19,9 @@ STATUS_COLORS = {
     "stopped": "#fbbf55",
     "ended": "#fb7185",
     "unknown": "#c4a7ff",
+    "observing": "#c4a7ff",
+    "active": "#46d483",
+    "static": "#94a3b8",
     "unbound": "#f0a95b",
     "window": "#67b7ff",
 }
@@ -52,6 +53,8 @@ class TerminalManagerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
+        self.activities: dict[str, ActivityState] = {}
+        self.activity_tracker = WindowActivityTracker()
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -92,8 +95,8 @@ class TerminalManagerApp:
         self.metric_values: dict[str, tk.Label] = {}
         metrics = (
             ("total", "全部终端", PALETTE["cyan"]),
-            ("running", "正在运行", STATUS_COLORS["running"]),
-            ("idle", "空闲 Shell", STATUS_COLORS["idle"]),
+            ("running", "正在输出", STATUS_COLORS["active"]),
+            ("idle", "静态窗口", STATUS_COLORS["static"]),
             ("unregistered", "待注册", STATUS_COLORS["window"]),
         )
         for index, (key, label, color) in enumerate(metrics):
@@ -144,7 +147,7 @@ class TerminalManagerApp:
         )
         search.pack(side=tk.LEFT, padx=(6, 0))
 
-        columns = ("name", "status", "command", "cwd", "window")
+        columns = ("name", "status", "activity", "last_change", "window")
         table = ttk.Frame(surface, style="Surface.TFrame")
         table.pack(fill=tk.BOTH, expand=True, padx=1)
         self.tree = ttk.Treeview(
@@ -158,14 +161,14 @@ class TerminalManagerApp:
         labels = {
             "name": "名称",
             "status": "状态",
-            "command": "当前前台命令",
-            "cwd": "工作目录",
+            "activity": "本次画面变化",
+            "last_change": "最近变化",
             "window": "窗口",
         }
-        widths = {"name": 190, "status": 115, "command": 240, "cwd": 300, "window": 205}
+        widths = {"name": 220, "status": 125, "activity": 160, "last_change": 170, "window": 390}
         for key in columns:
             self.tree.heading(key, text=labels[key])
-            self.tree.column(key, width=widths[key], minwidth=70, stretch=key in ("command", "cwd"))
+            self.tree.column(key, width=widths[key], minwidth=70, stretch=key == "window")
         scrollbar = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.tree.yview, style="Dark.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -241,18 +244,14 @@ class TerminalManagerApp:
             selected_shell_id = selection[0]
         try:
             self.windows = list_windows()
+            self.activities = self.activity_tracker.update(self.windows)
             error = ""
         except X11Error as exc:
             self.windows = []
+            self.activities = {}
             error = str(exc)
 
         shells = load_shells()
-        for info in shells:
-            if info.shell_pid > 0 and info.tty:
-                inspect_shell(info)
-            else:
-                info.status = "unbound"
-                info.status_detail = "已记录名称，但尚未关联 Shell，无法监测运行状态"
 
         self.tree.delete(*self.tree.get_children())
         self.items.clear()
@@ -263,8 +262,10 @@ class TerminalManagerApp:
             window = find_window(info.window_id, self.windows)
             if window:
                 covered_windows.add(info.window_id)
+            activity = self.activities.get(info.window_id)
+            status = activity.status if activity else "ended"
             searchable = " ".join(
-                (info.name, info.command, info.cwd, info.status, STATUS_LABELS.get(info.status, ""), window.title if window else "")
+                (info.name, status, STATUS_LABELS.get(status, ""), window.title if window else "")
             ).lower()
             if query and query not in searchable:
                 continue
@@ -276,12 +277,12 @@ class TerminalManagerApp:
                 iid=iid,
                 values=(
                     info.name,
-                    f"{STATUS_DOTS.get(info.status, '●')}  {STATUS_LABELS.get(info.status, info.status)}",
-                    compact(info.command, 46),
-                    compact(info.cwd, 54),
+                    status_text(status),
+                    ratio_text(activity),
+                    age_text(activity),
                     window.title if window else f"{info.window_id}（未找到）",
                 ),
-                tags=(info.status, "even" if row_index % 2 == 0 else "odd"),
+                tags=(status, "even" if row_index % 2 == 0 else "odd"),
             )
             row_index += 1
 
@@ -292,20 +293,22 @@ class TerminalManagerApp:
             if query and query not in searchable:
                 continue
             iid = f"window:{window.window_id}"
+            activity = self.activities.get(window.window_id)
+            status = activity.status if activity else "unknown"
             self.items[iid] = (None, window)
             self.tree.insert(
                 "",
                 tk.END,
                 iid=iid,
-                values=(window.title or "终端窗口", "●  未注册", "—", "—", window.wm_class),
-                tags=("window", "even" if row_index % 2 == 0 else "odd"),
+                values=(window.title or "终端窗口", status_text(status), ratio_text(activity), age_text(activity), f"未登记 · {window.title}"),
+                tags=(status, "even" if row_index % 2 == 0 else "odd"),
             )
             row_index += 1
 
         unregistered = sum(1 for window in self.windows if window.window_id not in covered_windows)
         total = len(shells) + unregistered
-        running = sum(1 for shell in shells if shell.status == "running")
-        idle = sum(1 for shell in shells if shell.status == "idle")
+        running = sum(1 for state in self.activities.values() if state.status == "active")
+        idle = sum(1 for state in self.activities.values() if state.status == "static")
         values = {"total": total, "running": running, "idle": idle, "unregistered": unregistered}
         for key, value in values.items():
             self.metric_values[key].configure(text=str(value))
@@ -352,19 +355,16 @@ class TerminalManagerApp:
             self.details.configure(text="选择一个 Shell 查看说明")
             return
         _iid, shell, window = selected
-        if shell:
-            age = max(0, int(time.time() - shell.last_seen))
-            certainty = "确定事实：窗口、Shell PID、TTY、前台进程、目录。状态名称是基于前台进程的推断。"
-            text = (
-                f"{STATUS_LABELS.get(shell.status, shell.status)}：{shell.status_detail}\n"
-                f"Shell PID {shell.shell_pid} · TTY {shell.tty} · 前台 PID {shell.foreground_pid or '未知'} · {age} 秒前更新\n"
-                f"{certainty}"
-            )
+        window_id = window.window_id if window else shell.window_id if shell else ""
+        activity = self.activities.get(window_id)
+        if activity:
+            text = activity_explanation(activity)
+            if shell:
+                text += f"\n用途名称“{shell.name}”仅保存在管理器中，与 Shell/TTY 无关。"
+            else:
+                text += "\n该窗口尚未命名；点击“登记窗口”只需记录用途名称。"
         else:
-            text = (
-                "这个终端窗口尚未登记，因此只能聚焦窗口。\n"
-                "点击“登记窗口”或“编辑记录”，直接填写名称并选择对应的 TTY/Shell，即可启用状态监测。"
-            )
+            text = "暂时无法取得该窗口的画面活动；窗口可能已经关闭。"
         if not window:
             text += "\n当前窗口 ID 已不存在；Shell 可能结束或窗口已经关闭。"
         self.details.configure(text=text)
@@ -398,29 +398,15 @@ class TerminalManagerApp:
         if not window:
             messagebox.showerror("窗口不存在", "当前记录对应的终端窗口已经关闭。", parent=self.root)
             return
-        assigned = {item.shell_pid for item in load_shells() if item.shell_pid > 0 and (not shell or item.shell_id != shell.shell_id)}
-        candidates = [
-            item
-            for item in discover_shell_candidates(window.pid)
-            if item.shell_pid not in assigned and can_preview_tty(item.tty)
-        ]
-        selected_index = 0
-        if shell and shell.shell_pid > 0:
-            match = next((index for index, item in enumerate(candidates, start=1) if item.shell_pid == shell.shell_pid), None)
-            selected_index = match or 0
-        elif candidates:
-            selected_index = suggest_candidate(window.title, candidates)
         dialog = RegistrationDialog(
             self.root,
             title="编辑终端记录" if shell else "登记终端窗口",
             initial_name=shell.name if shell else (window.title or "终端窗口"),
-            candidates=candidates,
-            selected_index=selected_index,
             palette=PALETTE,
         )
         if not dialog.result:
             return
-        name, candidate = dialog.result
+        name = dialog.result
         now = time.time()
         if shell is None:
             shell = ShellInfo(
@@ -440,26 +426,15 @@ class TerminalManagerApp:
             )
         shell.name = name
         shell.window_id = window.window_id
-        if candidate:
-            shell.shell_pid = candidate.shell_pid
-            shell.tty = candidate.tty
-            shell.cwd = candidate.cwd
-            shell.command = candidate.command
-            shell.status = candidate.status
-            shell.status_detail = candidate.status_detail
-            shell.foreground_pid = candidate.foreground_pid
-            shell.process_state = candidate.process_state
-            shell.last_seen = now
-        else:
-            shell.shell_pid = 0
-            shell.tty = ""
-            shell.status = "unbound"
-            shell.status_detail = "已记录名称，但尚未关联 Shell"
-            shell.command = ""
-            shell.cwd = ""
-            shell.foreground_pid = None
-            shell.process_state = ""
-            shell.last_seen = now
+        shell.shell_pid = 0
+        shell.tty = ""
+        shell.status = "unbound"
+        shell.status_detail = "窗口活动由画面变化直接检测"
+        shell.command = ""
+        shell.cwd = ""
+        shell.foreground_pid = None
+        shell.process_state = ""
+        shell.last_seen = now
         save_shell(shell)
         self.refresh()
 
@@ -475,9 +450,33 @@ class TerminalManagerApp:
             remove_shell(shell.shell_id)
             self.refresh()
 
-def compact(value: str, length: int) -> str:
-    value = value or "—"
-    return value if len(value) <= length else "…" + value[-(length - 1) :]
+def status_text(status: str) -> str:
+    return f"{STATUS_DOTS.get(status, '●')}  {STATUS_LABELS.get(status, status)}"
+
+
+def ratio_text(activity: ActivityState | None) -> str:
+    if not activity or activity.samples < 2:
+        return "采样中"
+    return f"{activity.changed_ratio:.3%}"
+
+
+def age_text(activity: ActivityState | None) -> str:
+    if not activity or activity.seconds_since_change is None:
+        return "等待第二次采样"
+    if activity.seconds_since_change < 0.5:
+        return "刚刚"
+    return f"{activity.seconds_since_change:.1f} 秒前"
+
+
+def activity_explanation(activity: ActivityState) -> str:
+    ratio = f"{activity.changed_ratio:.3%}"
+    if activity.status == "active":
+        return f"正在输出：最近检测到终端画面变化，本次变化比例 {ratio}。状态会保持约 4 秒。"
+    if activity.status == "static":
+        return f"静态/空闲：最近没有达到阈值的画面变化，本次变化比例 {ratio}。"
+    if activity.status == "observing":
+        return "正在采样：需要至少两帧画面才能判断输出是否变化。"
+    return "无法读取窗口画面，因此当前活动状态未知。"
 
 
 def item_id_for_window(

@@ -16,7 +16,7 @@ class X11Error(RuntimeError):
 def require_x11() -> None:
     if not os.environ.get("DISPLAY"):
         raise X11Error("未检测到 DISPLAY；Terminal Manager 当前需要 Linux X11 桌面会话。")
-    missing = [tool for tool in ("wmctrl", "xdotool") if not shutil.which(tool)]
+    missing = [tool for tool in ("wmctrl", "xdotool", "xwd") if not shutil.which(tool)]
     if missing:
         raise X11Error("缺少窗口控制工具：" + ", ".join(missing))
 
