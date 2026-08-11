@@ -12,6 +12,14 @@ from .model import WindowInfo
 CODEX_SPINNER_PREFIXES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 WAITING_PREFIXES = frozenset(("!", "！", "❗", "⚠"))
 WAITING_TITLE_MARKERS = ("[ ! ]", "[！]", "[!]", "❗", "⚠")
+WAITING_BODY_MARKERS = (
+    "action required",
+    "waiting for input",
+    "waiting for user",
+    "user input required",
+    "需要用户输入",
+    "等待用户输入",
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +52,7 @@ class WindowActivityTracker:
     affect this signal.
     """
 
-    def __init__(self, learning_threshold: int = 3, static_grace_seconds: float = 3.0) -> None:
+    def __init__(self, learning_threshold: int = 3, static_grace_seconds: float = 6.0) -> None:
         self.learning_threshold = max(2, learning_threshold)
         self.static_grace_seconds = max(0.0, static_grace_seconds)
         self.learned_spinner_prefixes: set[str] = set()
@@ -59,13 +67,13 @@ class WindowActivityTracker:
             prefix, body = split_status_prefix(window.title)
             previous = self._history.get(window.window_id)
             if previous is None:
-                status = self._classify(prefix)
+                status = self._classify(prefix, body)
                 previous = _History(prefix, body, status, now)
                 self._history[window.window_id] = previous
             else:
                 previous.samples += 1
                 self._learn_animation(previous, prefix, body)
-                status = self._classify(prefix)
+                status = self._classify(prefix, body)
                 display_prefix = prefix
                 if status == "static" and previous.status in ("active", "waiting"):
                     if previous.pending_static_since is None:
@@ -94,8 +102,8 @@ class WindowActivityTracker:
             del self._history[stale_id]
         return states
 
-    def _classify(self, prefix: str) -> str:
-        if prefix in WAITING_PREFIXES:
+    def _classify(self, prefix: str, body: str) -> str:
+        if prefix in WAITING_PREFIXES or has_waiting_body_marker(body):
             return "waiting"
         if prefix in CODEX_SPINNER_PREFIXES or prefix in self.learned_spinner_prefixes:
             return "active"
@@ -125,3 +133,8 @@ def split_status_prefix(title: str) -> tuple[str, str]:
     if separator and len(first) == 1 and body:
         return first, body
     return "", cleaned
+
+
+def has_waiting_body_marker(body: str) -> bool:
+    normalized = " ".join(body.casefold().split())
+    return any(marker in normalized for marker in WAITING_BODY_MARKERS)

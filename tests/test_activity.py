@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from terminal_manager.activity import WindowActivityTracker, split_status_prefix
+from terminal_manager.activity import WindowActivityTracker, has_waiting_body_marker, split_status_prefix
 from terminal_manager.model import WindowInfo
 
 
@@ -12,6 +12,18 @@ def test_split_status_prefix() -> None:
     assert split_status_prefix("⠹ hulk") == ("⠹", "hulk")
     assert split_status_prefix("[ ! ] Action Required | hulk") == ("!", "Action Required | hulk")
     assert split_status_prefix("mobile ledger") == ("", "mobile ledger")
+
+
+def test_waiting_body_marker_survives_missing_icon() -> None:
+    tracker = WindowActivityTracker(static_grace_seconds=0)
+    state = tracker.update([window("Action Required | mobile ledger")])["0x0000002a"]
+    assert state.status == "waiting"
+    assert has_waiting_body_marker("等待用户输入 | 手机记账")
+
+
+def test_ordinary_title_is_not_learned_as_waiting() -> None:
+    tracker = WindowActivityTracker(static_grace_seconds=0)
+    assert tracker.update([window("A project")])["0x0000002a"].status == "static"
 
 
 @patch("terminal_manager.activity.time.monotonic", side_effect=[0.0, 2.0, 7.0])
