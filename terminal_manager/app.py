@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+import uuid
+from tkinter import messagebox, ttk
 
 from . import __version__
+from .dialogs import RegistrationDialog
+from .discovery import discover_shell_candidates, suggest_candidate
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
+from .monitor import refresh as inspect_shell
 from .store import load_shells, remove_shell, save_shell
 from .x11 import X11Error, find_window, focus_window, list_windows
 
@@ -16,6 +20,7 @@ STATUS_COLORS = {
     "stopped": "#fbbf55",
     "ended": "#fb7185",
     "unknown": "#c4a7ff",
+    "unbound": "#f0a95b",
     "window": "#67b7ff",
 }
 
@@ -78,7 +83,7 @@ class TerminalManagerApp:
 
         header_actions = ttk.Frame(header, style="App.TFrame")
         header_actions.pack(side=tk.RIGHT)
-        ttk.Button(header_actions, text="注册 Shell", style="Ghost.TButton", command=self.show_register_help).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(header_actions, text="登记窗口", style="Ghost.TButton", command=self.register_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
 
         dashboard = ttk.Frame(container, style="App.TFrame")
@@ -177,7 +182,7 @@ class TerminalManagerApp:
         actions = ttk.Frame(footer, style="Surface.TFrame")
         actions.pack(side=tk.LEFT)
         ttk.Button(actions, text="进入并高亮", style="Accent.TButton", command=self.focus_selected).pack(side=tk.LEFT)
-        ttk.Button(actions, text="重命名", style="Ghost.TButton", command=self.rename_selected).pack(side=tk.LEFT, padx=8)
+        ttk.Button(actions, text="编辑记录", style="Ghost.TButton", command=self.rename_selected).pack(side=tk.LEFT, padx=8)
         ttk.Button(actions, text="移除记录", style="Danger.TButton", command=self.remove_selected).pack(side=tk.LEFT)
         tk.Label(footer, text="自动刷新  2s", foreground=PALETTE["subtle"], background=PALETTE["surface"], font=("Ubuntu", 9)).pack(side=tk.RIGHT)
 
@@ -241,11 +246,12 @@ class TerminalManagerApp:
             error = str(exc)
 
         shells = load_shells()
-        now = time.time()
         for info in shells:
-            if info.status != "ended" and now - info.last_seen > 6:
-                info.status = "unknown"
-                info.status_detail = "超过 6 秒未收到监测器更新"
+            if info.shell_pid > 0 and info.tty:
+                inspect_shell(info)
+            else:
+                info.status = "unbound"
+                info.status_detail = "已记录名称，但尚未关联 Shell，无法监测运行状态"
 
         self.tree.delete(*self.tree.get_children())
         self.items.clear()
@@ -346,8 +352,8 @@ class TerminalManagerApp:
             )
         else:
             text = (
-                "这个终端窗口尚未绑定到具体 Shell，因此只能聚焦窗口，不能准确显示命令和目录。\n"
-                "在该终端中执行 terminal-manager-register --name \"用途名称\" 即可启用状态监测。"
+                "这个终端窗口尚未登记，因此只能聚焦窗口。\n"
+                "点击“登记窗口”或“编辑记录”，直接填写名称并选择对应的 TTY/Shell，即可启用状态监测。"
             )
         if not window:
             text += "\n当前窗口 ID 已不存在；Shell 可能结束或窗口已经关闭。"
@@ -357,15 +363,91 @@ class TerminalManagerApp:
         selected = self.selected()
         if not selected:
             return
-        _iid, shell, _window = selected
+        _iid, shell, window = selected
         if not shell:
-            self.show_register_help()
+            self.register_selected()
             return
-        name = simpledialog.askstring("重命名", "Shell 用途名称：", initialvalue=shell.name, parent=self.root)
-        if name and name.strip():
-            shell.name = name.strip()
-            save_shell(shell)
-            self.refresh()
+        self.edit_record(shell, window)
+
+    def register_selected(self) -> None:
+        selected = self.selected()
+        if not selected:
+            messagebox.showinfo("登记窗口", "请先在列表中选择一个终端窗口。", parent=self.root)
+            return
+        _iid, shell, window = selected
+        if shell:
+            self.edit_record(shell, window)
+            return
+        if not window:
+            return
+        self.edit_record(None, window)
+
+    def edit_record(self, shell: ShellInfo | None, window: WindowInfo | None) -> None:
+        if not window and shell:
+            window = find_window(shell.window_id, self.windows)
+        if not window:
+            messagebox.showerror("窗口不存在", "当前记录对应的终端窗口已经关闭。", parent=self.root)
+            return
+        assigned = {item.shell_pid for item in load_shells() if item.shell_pid > 0 and (not shell or item.shell_id != shell.shell_id)}
+        candidates = [item for item in discover_shell_candidates(window.pid) if item.shell_pid not in assigned]
+        selected_index = 0
+        if shell and shell.shell_pid > 0:
+            match = next((index for index, item in enumerate(candidates, start=1) if item.shell_pid == shell.shell_pid), None)
+            selected_index = match or 0
+        elif candidates:
+            selected_index = suggest_candidate(window.title, candidates)
+        dialog = RegistrationDialog(
+            self.root,
+            title="编辑终端记录" if shell else "登记终端窗口",
+            initial_name=shell.name if shell else (window.title or "终端窗口"),
+            candidates=candidates,
+            selected_index=selected_index,
+            palette=PALETTE,
+        )
+        if not dialog.result:
+            return
+        name, candidate = dialog.result
+        now = time.time()
+        if shell is None:
+            shell = ShellInfo(
+                shell_id=uuid.uuid4().hex[:12],
+                window_id=window.window_id,
+                shell_pid=0,
+                tty="",
+                name=name,
+                status="unbound",
+                status_detail="仅记录名称",
+                command="",
+                cwd="",
+                foreground_pid=None,
+                process_state="",
+                registered_at=now,
+                last_seen=now,
+            )
+        shell.name = name
+        shell.window_id = window.window_id
+        if candidate:
+            shell.shell_pid = candidate.shell_pid
+            shell.tty = candidate.tty
+            shell.cwd = candidate.cwd
+            shell.command = candidate.command
+            shell.status = candidate.status
+            shell.status_detail = candidate.status_detail
+            shell.foreground_pid = candidate.foreground_pid
+            shell.process_state = candidate.process_state
+            shell.last_seen = now
+        else:
+            shell.shell_pid = 0
+            shell.tty = ""
+            shell.status = "unbound"
+            shell.status_detail = "已记录名称，但尚未关联 Shell"
+            shell.command = ""
+            shell.cwd = ""
+            shell.foreground_pid = None
+            shell.process_state = ""
+            shell.last_seen = now
+        save_shell(shell)
+        self.refresh()
 
     def remove_selected(self) -> None:
         selected = self.selected()
@@ -378,16 +460,6 @@ class TerminalManagerApp:
         if messagebox.askyesno("移除记录", f"从总览移除“{shell.name}”？\n不会关闭 Shell 或终止任务。", parent=self.root):
             remove_shell(shell.shell_id)
             self.refresh()
-
-    def show_register_help(self) -> None:
-        messagebox.showinfo(
-            "注册当前 Shell",
-            "切换到需要管理的终端，在其中执行：\n\n"
-            "terminal-manager-register --name \"用途名称\"\n\n"
-            "这不会重启、迁移或控制 Shell；只登记窗口并监测其前台进程。",
-            parent=self.root,
-        )
-
 
 def compact(value: str, length: int) -> str:
     value = value or "—"

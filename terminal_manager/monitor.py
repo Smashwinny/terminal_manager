@@ -62,7 +62,22 @@ def proc_cwd(pid: int) -> str:
         return ""
 
 
-def foreground_pgid(tty: str) -> int | None:
+def proc_tpgid(pid: int) -> int | None:
+    """Read the terminal foreground process group from Linux /proc.
+
+    /proc/<pid>/stat field 8 is tpgid. After removing pid and the parenthesized
+    comm field, it is index 5 in the remaining fields.
+    """
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        close = text.rfind(")")
+        value = int(text[close + 2 :].split()[5])
+        return value if value > 0 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def foreground_pgid(tty: str, shell_pid: int | None = None) -> int | None:
     try:
         fd = os.open(tty, os.O_RDONLY | os.O_NONBLOCK)
         try:
@@ -70,7 +85,7 @@ def foreground_pgid(tty: str) -> int | None:
         finally:
             os.close(fd)
     except OSError:
-        return None
+        return proc_tpgid(shell_pid) if shell_pid else None
 
 
 def refresh(info: ShellInfo) -> ShellInfo:
@@ -83,7 +98,7 @@ def refresh(info: ShellInfo) -> ShellInfo:
         info.last_seen = now
         return info
 
-    pgid = foreground_pgid(info.tty)
+    pgid = foreground_pgid(info.tty, info.shell_pid)
     info.foreground_pid = pgid
     target_pid = pgid or info.shell_pid
     short_command, state = proc_stat(target_pid)

@@ -66,6 +66,7 @@ STATUS_LABELS = {
     "stopped": "已暂停",
     "ended": "已结束",
     "unknown": "未知",
+    "unbound": "已记录",
     "window": "未注册",
 }
 

@@ -29,5 +29,5 @@ install -m 0644 "$launcher" "$desktop_dir/terminal-manager.desktop"
 
 printf '\n安装完成。\n'
 printf '启动命令：%s/terminal-manager\n' "$user_bin"
-printf '注册 Shell：%s/terminal-manager-register --name "用途名称"\n' "$user_bin"
+printf '登记窗口：在管理页面选择终端后，点击“登记窗口”。\n'
 printf '也可以在应用菜单中搜索 Terminal Manager。\n'
