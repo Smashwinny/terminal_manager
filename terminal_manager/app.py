@@ -13,6 +13,7 @@ from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
+from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature
 from .tty_probe import probe_visible_tty
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
@@ -60,6 +61,8 @@ class TerminalManagerApp:
         self.activities: dict[str, ActivityState] = {}
         self.activity_tracker = WindowActivityTracker()
         self.tab_activity_tracker = WindowActivityTracker()
+        self.thermal_tracker = ThermalTracker()
+        self.thermal_levels: dict[str, float] = {}
         self.tab_groups: dict[str, TabGroup] = {}
         self.tty_bindings = load_tty_bindings()
         self.tab_items: dict[str, tuple[TabGroup, int]] = {}
@@ -74,6 +77,7 @@ class TerminalManagerApp:
         self.focused_item_id: str | None = None
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
+        self.thermal_enabled = tk.BooleanVar(value=True)
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
         self.window_highlighter = WindowHighlighter(root)
@@ -93,7 +97,7 @@ class TerminalManagerApp:
         header.pack(fill=tk.X, pady=(0, 18))
         brand = ttk.Frame(header, style="App.TFrame")
         brand.pack(side=tk.LEFT)
-        logo = tk.Label(
+        self.logo = tk.Label(
             brand,
             text=">_",
             font=("Ubuntu Mono", 17, "bold"),
@@ -102,7 +106,7 @@ class TerminalManagerApp:
             padx=10,
             pady=7,
         )
-        logo.pack(side=tk.LEFT, padx=(0, 13))
+        self.logo.pack(side=tk.LEFT, padx=(0, 13))
         titles = ttk.Frame(brand, style="App.TFrame")
         titles.pack(side=tk.LEFT)
         ttk.Label(titles, text="Terminal Manager", style="Title.TLabel").pack(anchor=tk.W)
@@ -110,6 +114,14 @@ class TerminalManagerApp:
 
         header_actions = ttk.Frame(header, style="App.TFrame")
         header_actions.pack(side=tk.RIGHT)
+        self.thermal_toggle = ttk.Checkbutton(
+            header_actions,
+            text="温度渲染  0%",
+            variable=self.thermal_enabled,
+            command=self._toggle_thermal_rendering,
+            style="Thermal.TCheckbutton",
+        )
+        self.thermal_toggle.pack(side=tk.LEFT, padx=(0, 12))
         ttk.Button(header_actions, text="登记窗口", style="Ghost.TButton", command=self.register_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
 
@@ -246,8 +258,8 @@ class TerminalManagerApp:
             pady=13,
         )
         detail_box.pack(fill=tk.X, pady=(14, 0))
-        accent = tk.Frame(detail_box, background=PALETTE["accent"], width=3)
-        accent.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
+        self.detail_accent = tk.Frame(detail_box, background=PALETTE["accent"], width=3)
+        self.detail_accent.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
         detail_content = tk.Frame(detail_box, background=PALETTE["surface"])
         detail_content.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(detail_content, text="状态说明", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 10, "bold")).pack(anchor=tk.W)
@@ -264,6 +276,7 @@ class TerminalManagerApp:
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
+        self.style = style
         style.theme_use("clam")
         style.configure("App.TFrame", background=PALETTE["bg"])
         style.configure("Surface.TFrame", background=PALETTE["surface"])
@@ -275,6 +288,19 @@ class TerminalManagerApp:
         style.map("Ghost.TButton", background=[("active", PALETTE["surface_3"]), ("pressed", PALETTE["border"])])
         style.configure("Danger.TButton", background=PALETTE["surface_2"], foreground="#fb8da0", borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
         style.map("Danger.TButton", background=[("active", "#3a2030")])
+        style.configure(
+            "Thermal.TCheckbutton",
+            background=PALETTE["bg"],
+            foreground=PALETTE["muted"],
+            indicatorcolor=PALETTE["surface_3"],
+            padding=(8, 6),
+            font=("Noto Sans CJK SC", 9),
+        )
+        style.map(
+            "Thermal.TCheckbutton",
+            foreground=[("selected", PALETTE["text"])],
+            indicatorcolor=[("selected", PALETTE["accent"]), ("active", PALETTE["surface_3"])],
+        )
         style.configure("Shell.Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"], foreground=PALETTE["text"], borderwidth=0, relief="flat", rowheight=43, font=("Noto Sans CJK SC", 9))
         style.configure("Shell.Treeview.Heading", background=PALETTE["surface_3"], foreground=PALETTE["muted"], borderwidth=0, relief="flat", padding=(10, 10), font=("Noto Sans CJK SC", 9, "bold"))
         style.map("Shell.Treeview", background=[("selected", "#6557e8")], foreground=[("selected", "#ffffff")])
@@ -345,6 +371,19 @@ class TerminalManagerApp:
                 tab_signals.append(tab_window_signal(window, tab))
         tab_activities = self.tab_activity_tracker.update(tab_signals)
 
+        thermal_statuses = {
+            window_id: activity.status for window_id, activity in self.activities.items()
+        }
+        for group in self.tab_groups.values():
+            for tab in group.tabs:
+                if tab.selected:
+                    continue
+                signal_id = tab.signal_id(group.window_id)
+                tab_activity = tab_activities.get(signal_id)
+                if tab_activity:
+                    thermal_statuses[signal_id] = tab_activity.status
+        self.thermal_levels = self.thermal_tracker.update(thermal_statuses)
+
         for info, window, activity, status, name in rows:
             window_title = window.title if window else f"{info.window_id}（未找到）" if info else "窗口不存在"
             searchable = " ".join((name, status, STATUS_LABELS.get(status, ""), window_title)).lower()
@@ -365,7 +404,14 @@ class TerminalManagerApp:
                     age_text(activity),
                     signal_text(activity),
                 ),
-                tags=self._row_tags(status, row_index, info is None, window.window_id if window else ""),
+                tags=self._row_tags(
+                    status,
+                    row_index,
+                    info is None,
+                    window.window_id if window else "",
+                    item_id=iid,
+                    temperature=self.thermal_levels.get(window.window_id, 0.0) if window else 0.0,
+                ),
                 open=bool(window and window.window_id in expanded_windows),
             )
             row_index += 1
@@ -391,7 +437,15 @@ class TerminalManagerApp:
                             age_text(child_activity),
                             signal_text(child_activity),
                         ),
-                        tags=self._row_tags(child_status, None, info is None, window.window_id, child=True),
+                        tags=self._row_tags(
+                            child_status,
+                            None,
+                            info is None,
+                            window.window_id,
+                            item_id=child_id,
+                            temperature=self.thermal_levels.get(tab.signal_id(window.window_id), 0.0),
+                            child=True,
+                        ),
                     )
 
         registered_window_ids = {info.window_id for info in shells}
@@ -404,6 +458,7 @@ class TerminalManagerApp:
         for key, value in values.items():
             self.metric_values[key].configure(text=str(value))
         self._update_metric_cards()
+        self._apply_thermal_theme(mean_temperature(self.thermal_levels))
         if error:
             self.details.configure(text=error)
         active_item = None
@@ -526,16 +581,49 @@ class TerminalManagerApp:
         unregistered: bool,
         window_id: str,
         *,
+        item_id: str,
+        temperature: float,
         child: bool = False,
     ) -> tuple[str, ...]:
-        tags: list[str] = [status]
+        tags: list[str] = []
         if metric_matches(self.metric_highlight, status, unregistered):
             tags.append("metric_match")
-        elif child:
+        if self.thermal_enabled.get():
+            heat_tag = f"heat:{item_id}"
+            cold_background = "#0c1524" if child else PALETTE["surface_2"] if row_index is not None and row_index % 2 else PALETTE["surface"]
+            self.tree.tag_configure(
+                heat_tag,
+                background=blend_color(cold_background, HOT_ROW, temperature),
+                foreground=blend_color(STATUS_COLORS.get(status, PALETTE["text"]), "#ffffff", temperature),
+            )
+            tags.append(heat_tag)
+        tags.append(status)
+        if child:
             tags.append("child")
         elif row_index is not None:
             tags.append("even" if row_index % 2 == 0 else "odd")
         return tuple(tags)
+
+    def _toggle_thermal_rendering(self) -> None:
+        self.refresh()
+
+    def _apply_thermal_theme(self, project_temperature: float) -> None:
+        enabled = self.thermal_enabled.get()
+        temperature = project_temperature if enabled else 0.0
+        accent = blend_color(PALETTE["accent"], HOT_ACCENT, temperature)
+        hover = blend_color(PALETTE["accent_hover"], "#ff5964", temperature)
+        self.logo.configure(background=accent)
+        self.detail_accent.configure(background=accent)
+        self.thermal_toggle.configure(
+            text=f"温度渲染  {round(project_temperature * 100):d}%" if enabled else "温度渲染  已关闭"
+        )
+        self.style.configure("Accent.TButton", background=accent)
+        self.style.map("Accent.TButton", background=[("active", hover), ("pressed", accent)])
+        self.style.configure("Dark.Vertical.TScrollbar", background=accent)
+        self.style.map(
+            "Thermal.TCheckbutton",
+            indicatorcolor=[("selected", accent), ("active", PALETTE["surface_3"])],
+        )
 
     def _start_window_drag(self, event: tk.Event) -> None:
         self._drag_origin = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
