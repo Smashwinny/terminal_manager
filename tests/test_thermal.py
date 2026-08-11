@@ -1,4 +1,4 @@
-from terminal_manager.thermal import ThermalTracker, blend_color, mean_temperature
+from terminal_manager.thermal import ThermalTracker, blend_color, mean_temperature, visual_temperature
 
 
 def test_active_heats_to_maximum_in_ten_minutes() -> None:
@@ -20,3 +20,11 @@ def test_static_cools_and_waiting_holds() -> None:
 def test_colour_and_project_mean() -> None:
     assert blend_color("#000000", "#ffffff", 0.5) == "#808080"
     assert mean_temperature({"a": 0.25, "b": 0.75}) == 0.5
+
+
+def test_visual_curve_is_stronger_early_and_reaches_exact_endpoints() -> None:
+    assert visual_temperature(0) == 0
+    assert visual_temperature(0.01) == 0.1
+    assert visual_temperature(0.25) == 0.5
+    assert visual_temperature(1) == 1
+    assert visual_temperature(0.1) - visual_temperature(0) > visual_temperature(1) - visual_temperature(0.9)

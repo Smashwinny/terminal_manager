@@ -13,7 +13,7 @@ from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
-from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature
+from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty
 from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
@@ -593,8 +593,12 @@ class TerminalManagerApp:
             cold_background = "#0c1524" if child else PALETTE["surface_2"] if row_index is not None and row_index % 2 else PALETTE["surface"]
             self.tree.tag_configure(
                 heat_tag,
-                background=blend_color(cold_background, HOT_ROW, temperature),
-                foreground=blend_color(STATUS_COLORS.get(status, PALETTE["text"]), "#ffffff", temperature),
+                background=blend_color(cold_background, HOT_ROW, visual_temperature(temperature)),
+                foreground=blend_color(
+                    STATUS_COLORS.get(status, PALETTE["text"]),
+                    "#ffffff",
+                    visual_temperature(temperature),
+                ),
             )
             tags.append(heat_tag)
         tags.append(status)
@@ -609,7 +613,7 @@ class TerminalManagerApp:
 
     def _apply_thermal_theme(self, project_temperature: float) -> None:
         enabled = self.thermal_enabled.get()
-        temperature = project_temperature if enabled else 0.0
+        temperature = visual_temperature(project_temperature) if enabled else 0.0
         accent = blend_color(PALETTE["accent"], HOT_ACCENT, temperature)
         hover = blend_color(PALETTE["accent_hover"], "#ff5964", temperature)
         self.logo.configure(background=accent)

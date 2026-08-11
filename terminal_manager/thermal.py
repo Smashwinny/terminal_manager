@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -52,6 +53,11 @@ def blend_color(cold: str, hot: str, temperature: float) -> str:
 
 def mean_temperature(levels: dict[str, float]) -> float:
     return sum(levels.values()) / len(levels) if levels else 0.0
+
+
+def visual_temperature(temperature: float) -> float:
+    """Make early heat visible while preserving cold and maximum endpoints."""
+    return math.sqrt(min(1.0, max(0.0, temperature)))
 
 
 def _rgb(color: str) -> tuple[int, int, int]:
