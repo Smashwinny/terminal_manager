@@ -15,7 +15,7 @@ from .store import load_shells, load_tty_bindings, remove_shell, save_shell, sav
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty
-from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
+from .x11 import X11Error, active_window_id, begin_window_move, find_window, focus_window, list_windows
 
 
 STATUS_COLORS = {
@@ -71,7 +71,7 @@ class TerminalManagerApp:
         self._tab_group_misses: dict[str, int] = {}
         self._last_layout_rows: int | None = None
         self._group_click_job: str | None = None
-        self._drag_origin: tuple[int, int, int, int] | None = None
+        self._drag_pending: tuple[int, int, str | int] | None = None
         self.metric_highlight: str | None = None
         self.focused_window_id: str | None = None
         self.focused_item_id: str | None = None
@@ -116,7 +116,7 @@ class TerminalManagerApp:
         header_actions.pack(side=tk.RIGHT)
         self.thermal_toggle = ttk.Checkbutton(
             header_actions,
-            text="温度渲染  0%",
+            text="渲染",
             variable=self.thermal_enabled,
             command=self._toggle_thermal_rendering,
             style="Thermal.TCheckbutton",
@@ -139,7 +139,8 @@ class TerminalManagerApp:
         )
         drag_handle.pack(side=tk.RIGHT, padx=(0, 10))
         drag_handle.bind("<ButtonPress-1>", self._start_window_drag)
-        drag_handle.bind("<B1-Motion>", self._drag_window)
+        drag_handle.bind("<B1-Motion>", self._continue_window_drag)
+        drag_handle.bind("<ButtonRelease-1>", lambda _event: self._clear_window_drag())
 
         dashboard = ttk.Frame(container, style="App.TFrame")
         dashboard.pack(fill=tk.X, pady=(0, 16))
@@ -298,7 +299,7 @@ class TerminalManagerApp:
         )
         style.map(
             "Thermal.TCheckbutton",
-            foreground=[("selected", PALETTE["text"])],
+            foreground=[("selected", PALETTE["muted"]), ("active", PALETTE["muted"])],
             indicatorcolor=[("selected", PALETTE["accent"]), ("active", PALETTE["surface_3"])],
         )
         style.configure("Shell.Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"], foreground=PALETTE["text"], borderwidth=0, relief="flat", rowheight=43, font=("Noto Sans CJK SC", 9))
@@ -618,9 +619,7 @@ class TerminalManagerApp:
         hover = blend_color(PALETTE["accent_hover"], "#ff5964", temperature)
         self.logo.configure(background=accent)
         self.detail_accent.configure(background=accent)
-        self.thermal_toggle.configure(
-            text=f"温度渲染  {round(project_temperature * 100):d}%" if enabled else "温度渲染  已关闭"
-        )
+        self.thermal_toggle.configure(text="渲染")
         self.style.configure("Accent.TButton", background=accent)
         self.style.map("Accent.TButton", background=[("active", hover), ("pressed", accent)])
         self.style.configure("Dark.Vertical.TScrollbar", background=accent)
@@ -630,15 +629,20 @@ class TerminalManagerApp:
         )
 
     def _start_window_drag(self, event: tk.Event) -> None:
-        self._drag_origin = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
+        window_id = self.root.winfo_id()
+        self._drag_pending = (event.x_root, event.y_root, window_id)
 
-    def _drag_window(self, event: tk.Event) -> None:
-        if self._drag_origin is None:
+    def _continue_window_drag(self, event: tk.Event) -> None:
+        if self._drag_pending is None:
             return
-        start_x, start_y, window_x, window_y = self._drag_origin
-        x = window_x + event.x_root - start_x
-        y = window_y + event.y_root - start_y
-        self.root.geometry(f"+{x}+{y}")
+        start_x, start_y, window_id = self._drag_pending
+        if abs(event.x_root - start_x) + abs(event.y_root - start_y) < 4:
+            return
+        self._drag_pending = None
+        begin_window_move(window_id)
+
+    def _clear_window_drag(self) -> None:
+        self._drag_pending = None
 
     def _adapt_window_height(
         self,
