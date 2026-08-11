@@ -468,10 +468,6 @@ class TerminalManagerApp:
     def _toggle_group(self, item_id: str) -> None:
         if not self.tree.exists(item_id):
             return
-        # Capture the window anchor before changing the tree. Expanding a
-        # Treeview item can make some window managers reposition the toplevel
-        # immediately, so reading x/y afterwards is already too late.
-        anchor = (self.root.winfo_x(), self.root.winfo_y())
         previous_height = self.root.winfo_height()
         opened = not bool(self.tree.item(item_id, "open"))
         self.tree.item(item_id, open=opened)
@@ -484,7 +480,6 @@ class TerminalManagerApp:
             self.tree.item(item_id, values=values)
         self._adapt_window_height(
             force=True,
-            anchor=anchor,
             minimum_height=previous_height if opened else None,
         )
 
@@ -552,7 +547,6 @@ class TerminalManagerApp:
         self,
         *,
         force: bool = False,
-        anchor: tuple[int, int] | None = None,
         minimum_height: int | None = None,
     ) -> None:
         visible_rows = 0
@@ -565,7 +559,7 @@ class TerminalManagerApp:
             return
         self._last_layout_rows = visible_rows
         desired_height = max(640, 455 + visible_rows * 43)
-        current_x, current_y = anchor or (self.root.winfo_x(), self.root.winfo_y())
+        current_y = self.root.winfo_y()
         maximum_height = max(520, self.root.winfo_screenheight() - current_y - 55)
         target_height = min(desired_height, maximum_height)
         if minimum_height is not None:
@@ -580,13 +574,11 @@ class TerminalManagerApp:
         elif self.scrollbar.winfo_ismapped():
             self.scrollbar.pack_forget()
         width = max(1180, self.root.winfo_width())
-        self.root.geometry(f"{width}x{target_height}+{current_x}+{current_y}")
-        if anchor is not None:
-            self.root.after_idle(
-                lambda: self.root.geometry(
-                    f"{width}x{target_height}+{current_x}+{current_y}"
-                )
-            )
+        # A size-only geometry request leaves placement entirely untouched.
+        # Reapplying winfo_x/y here is incorrect on decorated X11 windows:
+        # Tk reports client coordinates while the window manager positions the
+        # outer frame, producing a title-bar-sized downward jump.
+        self.root.geometry(f"{width}x{target_height}")
 
     def focus_selected(self) -> None:
         selected = self.selected()
