@@ -246,6 +246,7 @@ class TerminalManagerApp:
         self.tree.tag_configure("child", background="#0c1524")
         self.tree.tag_configure("metric_match", background="#2c265c", foreground="#ffffff")
         self.tree.tag_configure("focused_shell", background="#6557e8", foreground="#ffffff")
+        self.tree.bind("<ButtonPress-1>", self._handle_tree_press)
         self.tree.bind("<Double-1>", self._handle_tree_double_click)
         self.tree.bind("<ButtonRelease-1>", self._handle_tree_click)
         self.tree.bind("<<TreeviewSelect>>", self._handle_tree_selection)
@@ -550,6 +551,16 @@ class TerminalManagerApp:
         elif item_id and self.tree.identify_column(event.x) == "#1" and self.tree.identify_region(event.x, event.y) == "cell":
             self.root.after_idle(self.focus_selected)
 
+    def _handle_tree_press(self, event: tk.Event) -> str | None:
+        item_id = self.tree.identify_row(event.y)
+        if item_id.startswith("group:"):
+            # Own every group-row mouse event so ttk's class-level double-click
+            # binding can never toggle the item's open state behind our back.
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+            return "break"
+        return None
+
     def _handle_tree_double_click(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
@@ -564,7 +575,7 @@ class TerminalManagerApp:
 
     def _schedule_group_click(self, callback) -> None:
         self._cancel_group_click()
-        self._group_click_job = self.root.after(240, lambda: self._run_group_click(callback))
+        self._group_click_job = self.root.after(520, lambda: self._run_group_click(callback))
 
     def _run_group_click(self, callback) -> None:
         self._group_click_job = None
