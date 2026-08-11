@@ -71,6 +71,7 @@ class TerminalManagerApp:
         self._drag_origin: tuple[int, int, int, int] | None = None
         self.metric_highlight: str | None = None
         self.focused_window_id: str | None = None
+        self.focused_item_id: str | None = None
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -276,7 +277,7 @@ class TerminalManagerApp:
         style.map("Danger.TButton", background=[("active", "#3a2030")])
         style.configure("Shell.Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"], foreground=PALETTE["text"], borderwidth=0, relief="flat", rowheight=43, font=("Noto Sans CJK SC", 9))
         style.configure("Shell.Treeview.Heading", background=PALETTE["surface_3"], foreground=PALETTE["muted"], borderwidth=0, relief="flat", padding=(10, 10), font=("Noto Sans CJK SC", 9, "bold"))
-        style.map("Shell.Treeview", background=[("selected", "#332d68")], foreground=[("selected", "#ffffff")])
+        style.map("Shell.Treeview", background=[("selected", "#6557e8")], foreground=[("selected", "#ffffff")])
         style.map("Shell.Treeview.Heading", background=[("active", PALETTE["surface_3"])])
         style.configure(
             "Dark.Vertical.TScrollbar",
@@ -409,8 +410,12 @@ class TerminalManagerApp:
         try:
             active_id = active_window_id()
             active_item = item_id_for_window(self.items, active_id)
+            if active_item:
+                self.focused_window_id = active_id
+                self.focused_item_id = active_item
         except (X11Error, ValueError):
             pass
+        self._apply_focused_shell_highlight()
         item_to_select = active_item or selected_shell_id
         if item_to_select and self.tree.exists(item_to_select):
             self.tree.selection_set(item_to_select)
@@ -524,9 +529,7 @@ class TerminalManagerApp:
         child: bool = False,
     ) -> tuple[str, ...]:
         tags: list[str] = [status]
-        if window_id and window_id == self.focused_window_id:
-            tags.append("focused_shell")
-        elif metric_matches(self.metric_highlight, status, unregistered):
+        if metric_matches(self.metric_highlight, status, unregistered):
             tags.append("metric_match")
         elif child:
             tags.append("child")
@@ -599,6 +602,7 @@ class TerminalManagerApp:
         if not window_id:
             return
         self.focused_window_id = window_id
+        self.focused_item_id = iid
         self._apply_focused_shell_highlight()
         self.root.update_idletasks()
         try:
@@ -634,10 +638,9 @@ class TerminalManagerApp:
         save_tty_binding(window_id, tab_key, tty)
 
     def _apply_focused_shell_highlight(self) -> None:
-        for item_id, (shell, window) in self.items.items():
-            linked_id = window.window_id if window else shell.window_id if shell else ""
+        for item_id in self.items:
             tags = [tag for tag in self.tree.item(item_id, "tags") if tag != "focused_shell"]
-            if linked_id and linked_id == self.focused_window_id:
+            if item_id == self.focused_item_id:
                 tags = [tag for tag in tags if tag != "metric_match"]
                 tags.insert(0, "focused_shell")
             self.tree.item(item_id, tags=tags)
