@@ -138,7 +138,7 @@ class TerminalManagerApp:
         toolbar = tk.Frame(surface, background=PALETTE["surface"], padx=16, pady=13)
         toolbar.pack(fill=tk.X)
         tk.Label(toolbar, text="Shell 工作区", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 11, "bold")).pack(side=tk.LEFT)
-        tk.Label(toolbar, text="双击条目即可聚焦并震动提示", foreground=PALETTE["muted"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 9)).pack(side=tk.LEFT, padx=12)
+        tk.Label(toolbar, text="点击 ▸ 展开标签 · 双击条目进入窗口", foreground=PALETTE["muted"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 9)).pack(side=tk.LEFT, padx=12)
         search_box = tk.Frame(toolbar, background=PALETTE["surface_2"], padx=10, pady=5)
         search_box.pack(side=tk.RIGHT)
         tk.Label(search_box, text="⌕", foreground=PALETTE["muted"], background=PALETTE["surface_2"], font=("DejaVu Sans", 12)).pack(side=tk.LEFT)
@@ -157,27 +157,25 @@ class TerminalManagerApp:
         )
         search.pack(side=tk.LEFT, padx=(6, 0))
 
-        columns = ("name", "status", "activity", "last_change", "window")
+        columns = ("name", "window", "status", "last_change", "activity")
         table = ttk.Frame(surface, style="Surface.TFrame")
         table.pack(fill=tk.BOTH, expand=True, padx=1)
         self.tree = ttk.Treeview(
             table,
             columns=columns,
-            show="tree headings",
+            show="headings",
             selectmode="browse",
             style="Shell.Treeview",
             height=5,
         )
-        self.tree.heading("#0", text="")
-        self.tree.column("#0", width=34, minwidth=34, stretch=False)
         labels = {
             "name": "名称",
-            "status": "状态",
-            "activity": "标题信号",
-            "last_change": "当前状态时长",
             "window": "窗口",
+            "status": "状态",
+            "last_change": "时长",
+            "activity": "标题信号",
         }
-        widths = {"name": 220, "status": 125, "activity": 160, "last_change": 170, "window": 390}
+        widths = {"name": 245, "window": 315, "status": 125, "last_change": 145, "activity": 170}
         for key in columns:
             self.tree.heading(key, text=labels[key])
             self.tree.column(key, width=widths[key], minwidth=70, stretch=key == "window")
@@ -189,7 +187,8 @@ class TerminalManagerApp:
             self.tree.tag_configure(status, foreground=color)
         self.tree.tag_configure("even", background=PALETTE["surface"])
         self.tree.tag_configure("odd", background=PALETTE["surface_2"])
-        self.tree.bind("<Double-1>", lambda _event: self.focus_selected())
+        self.tree.tag_configure("child", background="#0c1524")
+        self.tree.bind("<Double-1>", self._handle_tree_double_click)
         self.tree.bind("<ButtonRelease-1>", self._handle_tree_click)
         self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_details())
         self.tree.bind("<Return>", lambda _event: self.focus_selected())
@@ -316,7 +315,13 @@ class TerminalManagerApp:
                 "",
                 tk.END,
                 iid=iid,
-                values=(name, status_text(status), signal_text(activity), age_text(activity), registered_prefix + window_title),
+                values=(
+                    f"{'▾' if window and window.window_id in expanded_windows else '▸'}  {name}" if group else name,
+                    f"GNOME Terminal · {len(group.tabs)} 个标签" if group else registered_prefix + window_title,
+                    status_text(status),
+                    age_text(activity),
+                    signal_text(activity),
+                ),
                 tags=(status, "even" if row_index % 2 == 0 else "odd"),
                 open=bool(window and window.window_id in expanded_windows),
             )
@@ -336,8 +341,14 @@ class TerminalManagerApp:
                         tk.END,
                         iid=child_id,
                         text="",
-                        values=(f"↳ {child_title}", status_text(child_status), signal_text(child_activity), age_text(child_activity), "隐藏标签"),
-                        tags=(child_status,),
+                        values=(
+                            f"      └─  {child_title}",
+                            f"同一窗口 · 标签 {tab.index + 1}",
+                            status_text(child_status),
+                            age_text(child_activity),
+                            signal_text(child_activity),
+                        ),
+                        tags=(child_status, "child"),
                     )
 
         registered_window_ids = {info.window_id for info in shells}
@@ -375,8 +386,28 @@ class TerminalManagerApp:
 
     def _handle_tree_click(self, event: tk.Event) -> None:
         item_id = self.tree.identify_row(event.y)
-        if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) in ("tree", "cell"):
+        if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
+            bounds = self.tree.bbox(item_id, "name")
+            if bounds and event.x - bounds[0] <= 38:
+                opened = not bool(self.tree.item(item_id, "open"))
+                self.tree.item(item_id, open=opened)
+                values = list(self.tree.item(item_id, "values"))
+                if values:
+                    label = values[0]
+                    if label.startswith(("▸  ", "▾  ")):
+                        label = label[3:]
+                    values[0] = f"{'▾' if opened else '▸'}  {label}"
+                    self.tree.item(item_id, values=values)
+                return
+        if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) == "cell":
             self.root.after_idle(self.focus_selected)
+
+    def _handle_tree_double_click(self, event: tk.Event) -> str | None:
+        item_id = self.tree.identify_row(event.y)
+        if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
+            return "break"
+        self.focus_selected()
+        return None
 
     def focus_selected(self) -> None:
         selected = self.selected()
