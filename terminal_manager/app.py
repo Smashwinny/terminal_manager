@@ -77,6 +77,7 @@ class TerminalManagerApp:
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
         self._tab_group_misses: dict[str, int] = {}
+        self.expanded_window_ids: set[str] = set()
         self._last_layout_rows: int | None = None
         self._group_click_job: str | None = None
         self._suppress_group_release = False
@@ -319,11 +320,6 @@ class TerminalManagerApp:
             self.root.after_cancel(self.refresh_job)
             self.refresh_job = None
         selected_shell_id = None
-        expanded_windows = {
-            item.removeprefix("group:")
-            for item in self.tree.get_children()
-            if item.startswith("group:") and self.tree.item(item, "open")
-        }
         selection = self.tree.selection()
         if selection:
             selected_shell_id = selection[0]
@@ -383,6 +379,7 @@ class TerminalManagerApp:
                 if tab_activity:
                     thermal_statuses[signal_id] = tab_activity.status
         self.thermal_levels = self.thermal_tracker.update(thermal_statuses)
+        self.expanded_window_ids.intersection_update(self.tab_groups)
 
         for info, window, activity, status, name in rows:
             window_title = window.title if window else f"{info.window_id}（未找到）" if info else "窗口不存在"
@@ -400,7 +397,7 @@ class TerminalManagerApp:
                 tk.END,
                 iid=iid,
                 values=(
-                    f"{'▾' if window and window.window_id in expanded_windows else '▸'}  {name}" if group else name,
+                    f"{'▾' if window and window.window_id in self.expanded_window_ids else '▸'}  {name}" if group else name,
                     f"GNOME Terminal · {len(group.tabs)} 个标签" if group else registered_prefix + window_title,
                     display_directory(cwd),
                     status_text(status),
@@ -415,10 +412,9 @@ class TerminalManagerApp:
                     item_id=iid,
                     temperature=self.thermal_levels.get(window.window_id, 0.0) if window else 0.0,
                 ),
-                open=bool(window and window.window_id in expanded_windows),
             )
             row_index += 1
-            if group and window:
+            if group and window and window.window_id in self.expanded_window_ids:
                 for tab in group.tabs:
                     if tab.selected:
                         continue
@@ -430,7 +426,7 @@ class TerminalManagerApp:
                     self.items[child_id] = (info, window)
                     self.tab_items[child_id] = (group, tab.index)
                     self.tree.insert(
-                        iid,
+                        "",
                         tk.END,
                         iid=child_id,
                         text="",
@@ -589,20 +585,13 @@ class TerminalManagerApp:
     def _toggle_group(self, item_id: str) -> None:
         if not self.tree.exists(item_id):
             return
-        previous_height = self.root.winfo_height()
-        opened = not bool(self.tree.item(item_id, "open"))
-        self.tree.item(item_id, open=opened)
-        values = list(self.tree.item(item_id, "values"))
-        if values:
-            label = values[0]
-            if label.startswith(("▸  ", "▾  ")):
-                label = label[3:]
-            values[0] = f"{'▾' if opened else '▸'}  {label}"
-            self.tree.item(item_id, values=values)
-        self._adapt_window_height(
-            force=True,
-            minimum_height=previous_height if opened else None,
-        )
+        window_id = item_id.removeprefix("group:")
+        if window_id in self.expanded_window_ids:
+            self.expanded_window_ids.remove(window_id)
+        else:
+            self.expanded_window_ids.add(window_id)
+        self._last_layout_rows = None
+        self.refresh()
 
     def _bind_metric_card(self, widget: tk.Widget, key: str) -> None:
         widget.configure(cursor="hand2")
@@ -695,11 +684,7 @@ class TerminalManagerApp:
         force: bool = False,
         minimum_height: int | None = None,
     ) -> None:
-        visible_rows = 0
-        for item_id in self.tree.get_children():
-            visible_rows += 1
-            if self.tree.item(item_id, "open"):
-                visible_rows += len(self.tree.get_children(item_id))
+        visible_rows = len(self.tree.get_children())
         visible_rows = max(1, visible_rows)
         if not force and visible_rows == self._last_layout_rows:
             return
