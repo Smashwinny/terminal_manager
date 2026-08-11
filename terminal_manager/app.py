@@ -11,7 +11,7 @@ from .discovery import discover_shell_candidates, suggest_candidate
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .monitor import refresh as inspect_shell
 from .store import load_shells, remove_shell, save_shell
-from .x11 import X11Error, find_window, focus_window, list_windows
+from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
 STATUS_COLORS = {
@@ -310,8 +310,17 @@ class TerminalManagerApp:
             self.metric_values[key].configure(text=str(value))
         if error:
             self.details.configure(text=error)
-        if selected_shell_id and self.tree.exists(selected_shell_id):
-            self.tree.selection_set(selected_shell_id)
+        active_item = None
+        try:
+            active_item = item_id_for_window(self.items, active_window_id())
+        except (X11Error, ValueError):
+            pass
+        item_to_select = active_item or selected_shell_id
+        if item_to_select and self.tree.exists(item_to_select):
+            self.tree.selection_set(item_to_select)
+            self.tree.focus(item_to_select)
+            if active_item:
+                self.tree.see(item_to_select)
         self.update_details()
         self.refresh_job = self.root.after(2000, self.refresh)
 
@@ -464,6 +473,16 @@ class TerminalManagerApp:
 def compact(value: str, length: int) -> str:
     value = value or "—"
     return value if len(value) <= length else "…" + value[-(length - 1) :]
+
+
+def item_id_for_window(
+    items: dict[str, tuple[ShellInfo | None, WindowInfo | None]], window_id: str
+) -> str | None:
+    for item_id, (shell, window) in items.items():
+        linked_window_id = window.window_id if window else shell.window_id if shell else ""
+        if linked_window_id == window_id:
+            return item_id
+    return None
 
 
 def main() -> None:

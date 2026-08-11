@@ -57,10 +57,13 @@ def list_windows() -> list[WindowInfo]:
 
 def active_window_id() -> str:
     require_x11()
-    result = subprocess.run(
-        ["xdotool", "getactivewindow"], text=True, capture_output=True, timeout=2, check=True
-    )
-    return normalize_window_id(int(result.stdout.strip()))
+    try:
+        result = subprocess.run(
+            ["xdotool", "getactivewindow"], text=True, capture_output=True, timeout=2, check=True
+        )
+        return normalize_window_id(int(result.stdout.strip()))
+    except (subprocess.SubprocessError, ValueError) as exc:
+        raise X11Error("无法读取当前活动窗口") from exc
 
 
 def focus_window(window_id: str, *, shake: bool = True) -> None:

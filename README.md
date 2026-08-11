@@ -8,6 +8,7 @@ Terminal Manager 不接管 PTY、不迁移 Shell，也不会终止现有任务�
 
 - 自动发现 GNOME Terminal、Konsole、Tilix、Terminator、Kitty、Alacritty、WezTerm、XTerm、Wave 等 X11 终端窗口；
 - 双击或按 Enter 聚焦、抬升对应终端窗口，并以约 0.3 秒的小幅快速摆动明确提示目标；
+- 在桌面点击某个终端时，管理页会自动选中并滚动到对应记录，不抢夺输入焦点；
 - 给每个已注册 Shell 设置清晰的用途名称；
 - 显示 Shell PID、TTY、工作目录、前台进程和最近更新时间；
 - 区分空闲、运行中、暂停、结束和未知状态；
