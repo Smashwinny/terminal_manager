@@ -53,6 +53,13 @@ PALETTE = {
 class TerminalManagerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self.window_icon: tk.PhotoImage | None = None
+        icon_path = Path(__file__).parent / "assets" / "terminal-manager.png"
+        try:
+            self.window_icon = tk.PhotoImage(file=icon_path)
+            self.root.iconphoto(True, self.window_icon)
+        except tk.TclError:
+            pass
         self.root.title(f"Terminal Manager {__version__}")
         self.root.geometry("1180x720")
         self.root.minsize(860, 520)

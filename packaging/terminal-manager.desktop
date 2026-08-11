@@ -5,8 +5,7 @@ Name[zh_CN]=终端总控
 Comment=Focus and inspect existing terminal shells
 Comment[zh_CN]=聚焦并查看现有终端 Shell 状态
 Exec=@TERMINAL_MANAGER_EXEC@
-Icon=utilities-terminal
+Icon=terminal-manager
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupNotify=true
-
