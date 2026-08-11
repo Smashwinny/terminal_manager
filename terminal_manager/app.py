@@ -468,6 +468,11 @@ class TerminalManagerApp:
     def _toggle_group(self, item_id: str) -> None:
         if not self.tree.exists(item_id):
             return
+        # Capture the window anchor before changing the tree. Expanding a
+        # Treeview item can make some window managers reposition the toplevel
+        # immediately, so reading x/y afterwards is already too late.
+        anchor = (self.root.winfo_x(), self.root.winfo_y())
+        previous_height = self.root.winfo_height()
         opened = not bool(self.tree.item(item_id, "open"))
         self.tree.item(item_id, open=opened)
         values = list(self.tree.item(item_id, "values"))
@@ -477,7 +482,11 @@ class TerminalManagerApp:
                 label = label[3:]
             values[0] = f"{'▾' if opened else '▸'}  {label}"
             self.tree.item(item_id, values=values)
-        self._adapt_window_height(force=True)
+        self._adapt_window_height(
+            force=True,
+            anchor=anchor,
+            minimum_height=previous_height if opened else None,
+        )
 
     def _bind_metric_card(self, widget: tk.Widget, key: str) -> None:
         widget.configure(cursor="hand2")
@@ -539,7 +548,13 @@ class TerminalManagerApp:
         y = window_y + event.y_root - start_y
         self.root.geometry(f"+{x}+{y}")
 
-    def _adapt_window_height(self, *, force: bool = False) -> None:
+    def _adapt_window_height(
+        self,
+        *,
+        force: bool = False,
+        anchor: tuple[int, int] | None = None,
+        minimum_height: int | None = None,
+    ) -> None:
         visible_rows = 0
         for item_id in self.tree.get_children():
             visible_rows += 1
@@ -550,9 +565,13 @@ class TerminalManagerApp:
             return
         self._last_layout_rows = visible_rows
         desired_height = max(640, 455 + visible_rows * 43)
-        current_y = self.root.winfo_y()
-        maximum_height = max(520, self.root.winfo_screenheight() - current_y - 35)
+        current_x, current_y = anchor or (self.root.winfo_x(), self.root.winfo_y())
+        maximum_height = max(520, self.root.winfo_screenheight() - current_y - 55)
         target_height = min(desired_height, maximum_height)
+        if minimum_height is not None:
+            # Expanding must never shrink the existing window. If there is no
+            # room below, keep its size and let the list scroll instead.
+            target_height = max(minimum_height, target_height)
         overflow = desired_height > maximum_height
         self.tree.configure(height=visible_rows)
         if overflow:
@@ -561,8 +580,13 @@ class TerminalManagerApp:
         elif self.scrollbar.winfo_ismapped():
             self.scrollbar.pack_forget()
         width = max(1180, self.root.winfo_width())
-        x = self.root.winfo_x()
-        self.root.geometry(f"{width}x{target_height}+{x}+{current_y}")
+        self.root.geometry(f"{width}x{target_height}+{current_x}+{current_y}")
+        if anchor is not None:
+            self.root.after_idle(
+                lambda: self.root.geometry(
+                    f"{width}x{target_height}+{current_x}+{current_y}"
+                )
+            )
 
     def focus_selected(self) -> None:
         selected = self.selected()
