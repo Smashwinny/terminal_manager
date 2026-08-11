@@ -66,6 +66,23 @@ def active_window_id() -> str:
         raise X11Error("无法读取当前活动窗口") from exc
 
 
+def window_geometry(window_id: str) -> tuple[int, int, int, int]:
+    """Return actual X11 coordinates, avoiding wmctrl scaling inconsistencies."""
+    wid = normalize_window_id(window_id)
+    try:
+        result = subprocess.run(
+            ["xdotool", "getwindowgeometry", "--shell", wid],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=True,
+        )
+        values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        return tuple(int(values[key]) for key in ("X", "Y", "WIDTH", "HEIGHT"))
+    except (subprocess.SubprocessError, KeyError, ValueError) as exc:
+        raise X11Error("无法读取窗口位置") from exc
+
+
 def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> None:
     require_x11()
     wid = normalize_window_id(window_id)

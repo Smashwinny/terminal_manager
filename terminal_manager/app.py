@@ -9,10 +9,11 @@ from tkinter import messagebox, ttk
 from . import __version__
 from .activity import ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
+from .highlight import WindowHighlighter
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .store import load_shells, remove_shell, save_shell
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
-from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
+from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows, window_geometry
 
 
 STATUS_COLORS = {
@@ -72,6 +73,7 @@ class TerminalManagerApp:
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
+        self.window_highlighter = WindowHighlighter(root)
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -397,10 +399,20 @@ class TerminalManagerApp:
         if error:
             self.details.configure(text=error)
         active_item = None
+        active_window = None
         try:
-            active_item = item_id_for_window(self.items, active_window_id())
+            active_id = active_window_id()
+            active_item = item_id_for_window(self.items, active_id)
+            active_window = find_window(active_id, self.windows)
         except (X11Error, ValueError):
             pass
+        if active_window:
+            try:
+                self.window_highlighter.show(active_window, window_geometry(active_window.window_id))
+            except X11Error:
+                self.window_highlighter.hide()
+        else:
+            self.window_highlighter.hide()
         item_to_select = active_item or selected_shell_id
         if item_to_select and self.tree.exists(item_to_select):
             self.tree.selection_set(item_to_select)
@@ -555,6 +567,13 @@ class TerminalManagerApp:
             focus_window(window_id, shake=tab_target is None, sync=tab_target is None)
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
+            return
+        target_window = find_window(window_id, self.windows)
+        if target_window:
+            try:
+                self.window_highlighter.show(target_window, window_geometry(window_id))
+            except X11Error:
+                self.window_highlighter.hide()
 
     def _apply_focused_shell_highlight(self) -> None:
         for item_id, (shell, window) in self.items.items():
