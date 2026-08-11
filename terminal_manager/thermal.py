@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 
 HEAT_SECONDS = 10 * 60.0
-COOL_SECONDS = 2 * 60.0
+COOL_SECONDS = 6 * 60.0
 HOT_ROW = "#d92f45"
 HOT_ACCENT = "#ef3340"
 

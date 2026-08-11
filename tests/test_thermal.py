@@ -13,8 +13,8 @@ def test_static_cools_and_waiting_holds() -> None:
     tracker.update({"a": "active"}, now=0)
     tracker.update({"a": "active"}, now=600)
     assert tracker.update({"a": "waiting"}, now=900)["a"] == 1
-    assert tracker.update({"a": "static"}, now=960)["a"] == 0.5
-    assert tracker.update({"a": "static"}, now=1020)["a"] == 0
+    assert tracker.update({"a": "static"}, now=1080)["a"] == 0.5
+    assert tracker.update({"a": "static"}, now=1260)["a"] == 0
 
 
 def test_colour_and_project_mean() -> None:

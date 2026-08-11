@@ -15,7 +15,7 @@ from .store import load_shells, load_tty_bindings, remove_shell, save_shell, sav
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty
-from .x11 import X11Error, active_window_id, begin_window_move, find_window, focus_window, list_windows
+from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
 
 
 STATUS_COLORS = {
@@ -71,10 +71,11 @@ class TerminalManagerApp:
         self._tab_group_misses: dict[str, int] = {}
         self._last_layout_rows: int | None = None
         self._group_click_job: str | None = None
-        self._drag_pending: tuple[int, int, str | int] | None = None
         self.metric_highlight: str | None = None
-        self.focused_window_id: str | None = None
         self.focused_item_id: str | None = None
+        self._observed_active_item: str | None = None
+        self._focus_clear_job: str | None = None
+        self._focus_saved_tags: tuple[str, ...] | None = None
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.thermal_enabled = tk.BooleanVar(value=True)
@@ -114,33 +115,32 @@ class TerminalManagerApp:
 
         header_actions = ttk.Frame(header, style="App.TFrame")
         header_actions.pack(side=tk.RIGHT)
-        self.thermal_toggle = ttk.Checkbutton(
-            header_actions,
-            text="渲染",
-            variable=self.thermal_enabled,
-            command=self._toggle_thermal_rendering,
-            style="Thermal.TCheckbutton",
-        )
+        self.thermal_toggle = tk.Frame(header_actions, background=PALETTE["bg"], cursor="hand2")
         self.thermal_toggle.pack(side=tk.LEFT, padx=(0, 12))
+        self.thermal_indicator = tk.Canvas(
+            self.thermal_toggle,
+            width=16,
+            height=16,
+            background=PALETTE["bg"],
+            highlightthickness=0,
+            borderwidth=0,
+            cursor="hand2",
+        )
+        self.thermal_indicator.pack(side=tk.LEFT)
+        self.thermal_label = tk.Label(
+            self.thermal_toggle,
+            text="渲染",
+            foreground=PALETTE["muted"],
+            background=PALETTE["bg"],
+            font=("Noto Sans CJK SC", 9),
+            cursor="hand2",
+        )
+        self.thermal_label.pack(side=tk.LEFT, padx=(6, 0))
+        for widget in (self.thermal_toggle, self.thermal_indicator, self.thermal_label):
+            widget.bind("<Button-1>", lambda _event: self._toggle_thermal_rendering())
+        self._draw_thermal_toggle()
         ttk.Button(header_actions, text="登记窗口", style="Ghost.TButton", command=self.register_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
-
-        drag_handle = tk.Label(
-            header,
-            text="⠿  拖动窗口",
-            foreground=PALETTE["muted"],
-            background=PALETTE["surface"],
-            activeforeground=PALETTE["text"],
-            activebackground=PALETTE["surface_2"],
-            cursor="fleur",
-            padx=12,
-            pady=8,
-            font=("Noto Sans CJK SC", 9),
-        )
-        drag_handle.pack(side=tk.RIGHT, padx=(0, 10))
-        drag_handle.bind("<ButtonPress-1>", self._start_window_drag)
-        drag_handle.bind("<B1-Motion>", self._continue_window_drag)
-        drag_handle.bind("<ButtonRelease-1>", lambda _event: self._clear_window_drag())
 
         dashboard = ttk.Frame(container, style="App.TFrame")
         dashboard.pack(fill=tk.X, pady=(0, 16))
@@ -238,7 +238,7 @@ class TerminalManagerApp:
         self.tree.tag_configure("focused_shell", background="#6557e8", foreground="#ffffff")
         self.tree.bind("<Double-1>", self._handle_tree_double_click)
         self.tree.bind("<ButtonRelease-1>", self._handle_tree_click)
-        self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_details())
+        self.tree.bind("<<TreeviewSelect>>", self._handle_tree_selection)
         self.tree.bind("<Return>", lambda _event: self.focus_selected())
 
         footer = tk.Frame(surface, background=PALETTE["surface"], padx=16, pady=13)
@@ -289,22 +289,9 @@ class TerminalManagerApp:
         style.map("Ghost.TButton", background=[("active", PALETTE["surface_3"]), ("pressed", PALETTE["border"])])
         style.configure("Danger.TButton", background=PALETTE["surface_2"], foreground="#fb8da0", borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
         style.map("Danger.TButton", background=[("active", "#3a2030")])
-        style.configure(
-            "Thermal.TCheckbutton",
-            background=PALETTE["bg"],
-            foreground=PALETTE["muted"],
-            indicatorcolor=PALETTE["surface_3"],
-            padding=(8, 6),
-            font=("Noto Sans CJK SC", 9),
-        )
-        style.map(
-            "Thermal.TCheckbutton",
-            foreground=[("selected", PALETTE["muted"]), ("active", PALETTE["muted"])],
-            indicatorcolor=[("selected", PALETTE["accent"]), ("active", PALETTE["surface_3"])],
-        )
         style.configure("Shell.Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"], foreground=PALETTE["text"], borderwidth=0, relief="flat", rowheight=43, font=("Noto Sans CJK SC", 9))
         style.configure("Shell.Treeview.Heading", background=PALETTE["surface_3"], foreground=PALETTE["muted"], borderwidth=0, relief="flat", padding=(10, 10), font=("Noto Sans CJK SC", 9, "bold"))
-        style.map("Shell.Treeview", background=[("selected", "#6557e8")], foreground=[("selected", "#ffffff")])
+        style.map("Shell.Treeview", background=[], foreground=[])
         style.map("Shell.Treeview.Heading", background=[("active", PALETTE["surface_3"])])
         style.configure(
             "Dark.Vertical.TScrollbar",
@@ -467,8 +454,11 @@ class TerminalManagerApp:
             active_id = active_window_id()
             active_item = item_id_for_window(self.items, active_id)
             if active_item:
-                self.focused_window_id = active_id
-                self.focused_item_id = active_item
+                if active_item != self._observed_active_item:
+                    self._flash_workspace_item(active_item)
+                self._observed_active_item = active_item
+            else:
+                self._observed_active_item = None
         except (X11Error, ValueError):
             pass
         self._apply_focused_shell_highlight()
@@ -478,6 +468,8 @@ class TerminalManagerApp:
             self.tree.focus(item_to_select)
             if active_item:
                 self.tree.see(item_to_select)
+        if self.focused_item_id is None:
+            self._sync_selected_style()
         self.update_details()
         self._adapt_window_height()
         self.refresh_job = self.root.after(2000, self.refresh)
@@ -489,6 +481,26 @@ class TerminalManagerApp:
         iid = selection[0]
         shell, window = self.items[iid]
         return iid, shell, window
+
+    def _handle_tree_selection(self, _event: tk.Event) -> None:
+        self.update_details()
+        if self.focused_item_id is None:
+            self._sync_selected_style()
+
+    def _sync_selected_style(self) -> None:
+        selection = self.tree.selection()
+        background = PALETTE["surface"]
+        foreground = PALETTE["text"]
+        if selection and self.tree.exists(selection[0]):
+            for tag in self.tree.item(selection[0], "tags"):
+                configured = self.tree.tag_configure(tag)
+                background = configured.get("background") or background
+                foreground = configured.get("foreground") or foreground
+        self.style.map(
+            "Shell.Treeview",
+            background=[("selected", background)],
+            foreground=[("selected", foreground)],
+        )
 
     def _handle_tree_click(self, event: tk.Event) -> None:
         item_id = self.tree.identify_row(event.y)
@@ -586,9 +598,8 @@ class TerminalManagerApp:
         temperature: float,
         child: bool = False,
     ) -> tuple[str, ...]:
-        tags: list[str] = []
         if metric_matches(self.metric_highlight, status, unregistered):
-            tags.append("metric_match")
+            return ("metric_match",)
         if self.thermal_enabled.get():
             heat_tag = f"heat:{item_id}"
             cold_background = "#0c1524" if child else PALETTE["surface_2"] if row_index is not None and row_index % 2 else PALETTE["surface"]
@@ -601,8 +612,8 @@ class TerminalManagerApp:
                     visual_temperature(temperature),
                 ),
             )
-            tags.append(heat_tag)
-        tags.append(status)
+            return (heat_tag,)
+        tags: list[str] = [status]
         if child:
             tags.append("child")
         elif row_index is not None:
@@ -610,7 +621,15 @@ class TerminalManagerApp:
         return tuple(tags)
 
     def _toggle_thermal_rendering(self) -> None:
+        self.thermal_enabled.set(not self.thermal_enabled.get())
+        self._draw_thermal_toggle()
         self.refresh()
+
+    def _draw_thermal_toggle(self) -> None:
+        self.thermal_indicator.delete("all")
+        self.thermal_indicator.create_oval(2, 2, 14, 14, outline=PALETTE["muted"], width=1)
+        if self.thermal_enabled.get():
+            self.thermal_indicator.create_oval(6, 6, 10, 10, fill=PALETTE["muted"], outline="")
 
     def _apply_thermal_theme(self, project_temperature: float) -> None:
         enabled = self.thermal_enabled.get()
@@ -619,30 +638,10 @@ class TerminalManagerApp:
         hover = blend_color(PALETTE["accent_hover"], "#ff5964", temperature)
         self.logo.configure(background=accent)
         self.detail_accent.configure(background=accent)
-        self.thermal_toggle.configure(text="渲染")
+        self._draw_thermal_toggle()
         self.style.configure("Accent.TButton", background=accent)
         self.style.map("Accent.TButton", background=[("active", hover), ("pressed", accent)])
         self.style.configure("Dark.Vertical.TScrollbar", background=accent)
-        self.style.map(
-            "Thermal.TCheckbutton",
-            indicatorcolor=[("selected", accent), ("active", PALETTE["surface_3"])],
-        )
-
-    def _start_window_drag(self, event: tk.Event) -> None:
-        window_id = self.root.winfo_id()
-        self._drag_pending = (event.x_root, event.y_root, window_id)
-
-    def _continue_window_drag(self, event: tk.Event) -> None:
-        if self._drag_pending is None:
-            return
-        start_x, start_y, window_id = self._drag_pending
-        if abs(event.x_root - start_x) + abs(event.y_root - start_y) < 4:
-            return
-        self._drag_pending = None
-        begin_window_move(window_id)
-
-    def _clear_window_drag(self) -> None:
-        self._drag_pending = None
 
     def _adapt_window_height(
         self,
@@ -697,9 +696,7 @@ class TerminalManagerApp:
         window_id = window.window_id if window else shell.window_id if shell else ""
         if not window_id:
             return
-        self.focused_window_id = window_id
-        self.focused_item_id = iid
-        self._apply_focused_shell_highlight()
+        self._flash_workspace_item(iid)
         self.root.update_idletasks()
         try:
             focus_window(window_id, shake=tab_target is None, sync=tab_target is None)
@@ -735,11 +732,29 @@ class TerminalManagerApp:
 
     def _apply_focused_shell_highlight(self) -> None:
         for item_id in self.items:
-            tags = [tag for tag in self.tree.item(item_id, "tags") if tag != "focused_shell"]
             if item_id == self.focused_item_id:
-                tags = [tag for tag in tags if tag != "metric_match"]
-                tags.insert(0, "focused_shell")
-            self.tree.item(item_id, tags=tags)
+                self.tree.item(item_id, tags=("focused_shell",))
+
+    def _flash_workspace_item(self, item_id: str, duration_ms: int = 1100) -> None:
+        if self._focus_clear_job is not None:
+            self.root.after_cancel(self._focus_clear_job)
+        if self.focused_item_id and self._focus_saved_tags and self.tree.exists(self.focused_item_id):
+            self.tree.item(self.focused_item_id, tags=self._focus_saved_tags)
+        self.focused_item_id = item_id
+        self._focus_saved_tags = tuple(self.tree.item(item_id, "tags")) if self.tree.exists(item_id) else None
+        self._apply_focused_shell_highlight()
+        self.style.map(
+            "Shell.Treeview",
+            background=[("selected", "#6557e8")],
+            foreground=[("selected", "#ffffff")],
+        )
+        self._focus_clear_job = self.root.after(duration_ms, self._clear_workspace_highlight)
+
+    def _clear_workspace_highlight(self) -> None:
+        self._focus_clear_job = None
+        self.focused_item_id = None
+        self._focus_saved_tags = None
+        self.refresh()
 
     def _harvest_tab_scan(self) -> None:
         if self._tab_scan_result is not None:

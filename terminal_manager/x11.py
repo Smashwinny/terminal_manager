@@ -4,8 +4,6 @@ import os
 import shutil
 import subprocess
 import time
-import ctypes
-import ctypes.util
 from typing import Iterable
 
 from .model import WindowInfo, normalize_window_id
@@ -81,100 +79,6 @@ def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> No
     subprocess.run(activate, timeout=3, check=False)
     if shake:
         shake_window(wid)
-
-
-class _ClientData(ctypes.Union):
-    _fields_ = [("b", ctypes.c_char * 20), ("s", ctypes.c_short * 10), ("l", ctypes.c_long * 5)]
-
-
-class _ClientMessage(ctypes.Structure):
-    _fields_ = [
-        ("type", ctypes.c_int),
-        ("serial", ctypes.c_ulong),
-        ("send_event", ctypes.c_int),
-        ("display", ctypes.c_void_p),
-        ("window", ctypes.c_ulong),
-        ("message_type", ctypes.c_ulong),
-        ("format", ctypes.c_int),
-        ("data", _ClientData),
-    ]
-
-
-class _XEvent(ctypes.Union):
-    _fields_ = [("type", ctypes.c_int), ("xclient", _ClientMessage), ("padding", ctypes.c_long * 24)]
-
-
-def begin_window_move(window_id: str | int) -> bool:
-    """Ask the X11 window manager to perform a native interactive move."""
-    library = ctypes.util.find_library("X11")
-    if not library:
-        return False
-    x11 = ctypes.CDLL(library)
-    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-    x11.XOpenDisplay.restype = ctypes.c_void_p
-    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
-    x11.XDefaultRootWindow.restype = ctypes.c_ulong
-    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
-    x11.XInternAtom.restype = ctypes.c_ulong
-    x11.XQueryPointer.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.POINTER(ctypes.c_uint),
-    ]
-    x11.XUngrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-    x11.XSendEvent.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_int,
-        ctypes.c_long,
-        ctypes.POINTER(_XEvent),
-    ]
-    x11.XFlush.argtypes = [ctypes.c_void_p]
-    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
-    display = x11.XOpenDisplay(None)
-    if not display:
-        return False
-    try:
-        root = x11.XDefaultRootWindow(display)
-        atom = x11.XInternAtom(display, b"_NET_WM_MOVERESIZE", False)
-        root_return = ctypes.c_ulong()
-        child_return = ctypes.c_ulong()
-        root_x = ctypes.c_int()
-        root_y = ctypes.c_int()
-        window_x = ctypes.c_int()
-        window_y = ctypes.c_int()
-        mask = ctypes.c_uint()
-        if not x11.XQueryPointer(
-            display,
-            root,
-            ctypes.byref(root_return),
-            ctypes.byref(child_return),
-            ctypes.byref(root_x),
-            ctypes.byref(root_y),
-            ctypes.byref(window_x),
-            ctypes.byref(window_y),
-            ctypes.byref(mask),
-        ):
-            return False
-        event = _XEvent()
-        event.xclient.type = 33  # ClientMessage
-        event.xclient.display = display
-        event.xclient.window = int(normalize_window_id(window_id), 16)
-        event.xclient.message_type = atom
-        event.xclient.format = 32
-        event.xclient.data.l[:] = (root_x.value, root_y.value, 8, 1, 1)  # MOVE, button 1
-        x11.XUngrabPointer(display, 0)
-        sent = x11.XSendEvent(display, root, False, (1 << 20) | (1 << 19), ctypes.byref(event))
-        x11.XFlush(display)
-        return bool(sent)
-    finally:
-        x11.XCloseDisplay(display)
 
 
 def shake_window(window_id: str) -> None:
