@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import os
 import time
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 from . import __version__
@@ -13,12 +11,28 @@ from .x11 import X11Error, find_window, focus_window, list_windows
 
 
 STATUS_COLORS = {
-    "idle": "#5b6472",
-    "running": "#16803c",
-    "stopped": "#b76e00",
-    "ended": "#a32929",
-    "unknown": "#7653a6",
-    "window": "#53657d",
+    "idle": "#94a3b8",
+    "running": "#46d483",
+    "stopped": "#fbbf55",
+    "ended": "#fb7185",
+    "unknown": "#c4a7ff",
+    "window": "#67b7ff",
+}
+
+STATUS_DOTS = {status: "●" for status in STATUS_COLORS}
+
+PALETTE = {
+    "bg": "#080d18",
+    "surface": "#101827",
+    "surface_2": "#151f31",
+    "surface_3": "#1b273b",
+    "border": "#26354d",
+    "text": "#f2f6ff",
+    "muted": "#8fa1ba",
+    "subtle": "#64748b",
+    "accent": "#7c6cff",
+    "accent_hover": "#9185ff",
+    "cyan": "#47c8ff",
 }
 
 
@@ -26,29 +40,115 @@ class TerminalManagerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"Terminal Manager {__version__}")
-        self.root.geometry("1080x620")
-        self.root.minsize(760, 430)
+        self.root.geometry("1180x720")
+        self.root.minsize(860, 520)
+        self.root.configure(background=PALETTE["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
         self.refresh_job: str | None = None
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
         self.refresh()
 
     def _build_ui(self) -> None:
-        container = ttk.Frame(self.root, padding=12)
+        self._configure_styles()
+        container = ttk.Frame(self.root, style="App.TFrame", padding=(24, 20, 24, 22))
         container.pack(fill=tk.BOTH, expand=True)
 
-        header = ttk.Frame(container)
-        header.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(header, text="当前 Shell 总览", font=("Sans", 17, "bold")).pack(side=tk.LEFT)
-        self.summary = ttk.Label(header, text="")
-        self.summary.pack(side=tk.LEFT, padx=14)
-        ttk.Button(header, text="刷新", command=self.refresh).pack(side=tk.RIGHT)
-        ttk.Button(header, text="注册方法", command=self.show_register_help).pack(side=tk.RIGHT, padx=6)
+        header = ttk.Frame(container, style="App.TFrame")
+        header.pack(fill=tk.X, pady=(0, 18))
+        brand = ttk.Frame(header, style="App.TFrame")
+        brand.pack(side=tk.LEFT)
+        logo = tk.Label(
+            brand,
+            text=">_",
+            font=("Ubuntu Mono", 17, "bold"),
+            foreground="#ffffff",
+            background=PALETTE["accent"],
+            padx=10,
+            pady=7,
+        )
+        logo.pack(side=tk.LEFT, padx=(0, 13))
+        titles = ttk.Frame(brand, style="App.TFrame")
+        titles.pack(side=tk.LEFT)
+        ttk.Label(titles, text="Terminal Manager", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(titles, text="你的 Shell，一眼看清 · 一键抵达", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(2, 0))
+
+        header_actions = ttk.Frame(header, style="App.TFrame")
+        header_actions.pack(side=tk.RIGHT)
+        ttk.Button(header_actions, text="注册 Shell", style="Ghost.TButton", command=self.show_register_help).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
+
+        dashboard = ttk.Frame(container, style="App.TFrame")
+        dashboard.pack(fill=tk.X, pady=(0, 16))
+        self.metric_values: dict[str, tk.Label] = {}
+        metrics = (
+            ("total", "全部终端", PALETTE["cyan"]),
+            ("running", "正在运行", STATUS_COLORS["running"]),
+            ("idle", "空闲 Shell", STATUS_COLORS["idle"]),
+            ("unregistered", "待注册", STATUS_COLORS["window"]),
+        )
+        for index, (key, label, color) in enumerate(metrics):
+            card = tk.Frame(
+                dashboard,
+                background=PALETTE["surface"],
+                highlightbackground=PALETTE["border"],
+                highlightthickness=1,
+                padx=16,
+                pady=11,
+            )
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if index == 0 else 6, 0 if index == len(metrics) - 1 else 6))
+            top = tk.Frame(card, background=PALETTE["surface"])
+            top.pack(fill=tk.X)
+            tk.Label(top, text="●", foreground=color, background=PALETTE["surface"], font=("DejaVu Sans", 8)).pack(side=tk.LEFT)
+            tk.Label(top, text=label, foreground=PALETTE["muted"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 9)).pack(side=tk.LEFT, padx=(7, 0))
+            value = tk.Label(card, text="0", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Ubuntu", 20, "bold"))
+            value.pack(anchor=tk.W, pady=(4, 0))
+            self.metric_values[key] = value
+
+        surface = tk.Frame(
+            container,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["border"],
+            highlightthickness=1,
+        )
+        surface.pack(fill=tk.BOTH, expand=True)
+
+        toolbar = tk.Frame(surface, background=PALETTE["surface"], padx=16, pady=13)
+        toolbar.pack(fill=tk.X)
+        tk.Label(toolbar, text="Shell 工作区", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 11, "bold")).pack(side=tk.LEFT)
+        tk.Label(toolbar, text="双击条目即可聚焦并震动提示", foreground=PALETTE["muted"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 9)).pack(side=tk.LEFT, padx=12)
+        search_box = tk.Frame(toolbar, background=PALETTE["surface_2"], padx=10, pady=5)
+        search_box.pack(side=tk.RIGHT)
+        tk.Label(search_box, text="⌕", foreground=PALETTE["muted"], background=PALETTE["surface_2"], font=("DejaVu Sans", 12)).pack(side=tk.LEFT)
+        search = tk.Entry(
+            search_box,
+            textvariable=self.search_var,
+            width=24,
+            background=PALETTE["surface_2"],
+            foreground=PALETTE["text"],
+            insertbackground=PALETTE["text"],
+            selectbackground=PALETTE["accent"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Noto Sans CJK SC", 9),
+        )
+        search.pack(side=tk.LEFT, padx=(6, 0))
 
         columns = ("name", "status", "command", "cwd", "window")
-        self.tree = ttk.Treeview(container, columns=columns, show="headings", selectmode="browse")
+        table = ttk.Frame(surface, style="Surface.TFrame")
+        table.pack(fill=tk.BOTH, expand=True, padx=1)
+        self.tree = ttk.Treeview(
+            table,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="Shell.Treeview",
+            height=5,
+        )
         labels = {
             "name": "名称",
             "status": "状态",
@@ -56,31 +156,74 @@ class TerminalManagerApp:
             "cwd": "工作目录",
             "window": "窗口",
         }
-        widths = {"name": 175, "status": 100, "command": 230, "cwd": 300, "window": 170}
+        widths = {"name": 190, "status": 115, "command": 240, "cwd": 300, "window": 205}
         for key in columns:
             self.tree.heading(key, text=labels[key])
             self.tree.column(key, width=widths[key], minwidth=70, stretch=key in ("command", "cwd"))
-        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.tree.yview, style="Dark.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        scrollbar.place(in_=self.tree, relx=1.0, rely=0, relheight=1.0, anchor="ne")
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         for status, color in STATUS_COLORS.items():
             self.tree.tag_configure(status, foreground=color)
+        self.tree.tag_configure("even", background=PALETTE["surface"])
+        self.tree.tag_configure("odd", background=PALETTE["surface_2"])
         self.tree.bind("<Double-1>", lambda _event: self.focus_selected())
         self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_details())
         self.tree.bind("<Return>", lambda _event: self.focus_selected())
 
-        buttons = ttk.Frame(container)
-        buttons.pack(fill=tk.X, pady=8)
-        ttk.Button(buttons, text="进入/高亮 Shell", command=self.focus_selected).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="重命名", command=self.rename_selected).pack(side=tk.LEFT, padx=6)
-        ttk.Button(buttons, text="移除记录", command=self.remove_selected).pack(side=tk.LEFT)
-        ttk.Label(buttons, text="双击条目也可进入；每 2 秒自动刷新", foreground="#666").pack(side=tk.RIGHT)
+        footer = tk.Frame(surface, background=PALETTE["surface"], padx=16, pady=13)
+        footer.pack(fill=tk.X)
+        actions = ttk.Frame(footer, style="Surface.TFrame")
+        actions.pack(side=tk.LEFT)
+        ttk.Button(actions, text="进入并高亮", style="Accent.TButton", command=self.focus_selected).pack(side=tk.LEFT)
+        ttk.Button(actions, text="重命名", style="Ghost.TButton", command=self.rename_selected).pack(side=tk.LEFT, padx=8)
+        ttk.Button(actions, text="移除记录", style="Danger.TButton", command=self.remove_selected).pack(side=tk.LEFT)
+        tk.Label(footer, text="自动刷新  2s", foreground=PALETTE["subtle"], background=PALETTE["surface"], font=("Ubuntu", 9)).pack(side=tk.RIGHT)
 
-        detail_box = ttk.LabelFrame(container, text="状态说明", padding=9)
-        detail_box.pack(fill=tk.X)
-        self.details = ttk.Label(detail_box, text="选择一个 Shell 查看说明", justify=tk.LEFT)
-        self.details.pack(fill=tk.X)
+        detail_box = tk.Frame(
+            container,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["border"],
+            highlightthickness=1,
+            padx=16,
+            pady=13,
+        )
+        detail_box.pack(fill=tk.X, pady=(14, 0))
+        accent = tk.Frame(detail_box, background=PALETTE["accent"], width=3)
+        accent.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
+        detail_content = tk.Frame(detail_box, background=PALETTE["surface"])
+        detail_content.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(detail_content, text="状态说明", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 10, "bold")).pack(anchor=tk.W)
+        self.details = tk.Label(
+            detail_content,
+            text="选择一个 Shell 查看说明",
+            justify=tk.LEFT,
+            anchor=tk.W,
+            foreground=PALETTE["muted"],
+            background=PALETTE["surface"],
+            font=("Noto Sans CJK SC", 9),
+        )
+        self.details.pack(fill=tk.X, pady=(5, 0))
+
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("App.TFrame", background=PALETTE["bg"])
+        style.configure("Surface.TFrame", background=PALETTE["surface"])
+        style.configure("Title.TLabel", background=PALETTE["bg"], foreground=PALETTE["text"], font=("Ubuntu", 18, "bold"))
+        style.configure("Subtitle.TLabel", background=PALETTE["bg"], foreground=PALETTE["muted"], font=("Noto Sans CJK SC", 9))
+        style.configure("Accent.TButton", background=PALETTE["accent"], foreground="#ffffff", borderwidth=0, padding=(15, 8), font=("Noto Sans CJK SC", 9, "bold"))
+        style.map("Accent.TButton", background=[("active", PALETTE["accent_hover"]), ("pressed", "#6657e8")])
+        style.configure("Ghost.TButton", background=PALETTE["surface_2"], foreground=PALETTE["text"], borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
+        style.map("Ghost.TButton", background=[("active", PALETTE["surface_3"]), ("pressed", PALETTE["border"])])
+        style.configure("Danger.TButton", background=PALETTE["surface_2"], foreground="#fb8da0", borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
+        style.map("Danger.TButton", background=[("active", "#3a2030")])
+        style.configure("Shell.Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"], foreground=PALETTE["text"], borderwidth=0, relief="flat", rowheight=43, font=("Noto Sans CJK SC", 9))
+        style.configure("Shell.Treeview.Heading", background=PALETTE["surface_3"], foreground=PALETTE["muted"], borderwidth=0, relief="flat", padding=(10, 10), font=("Noto Sans CJK SC", 9, "bold"))
+        style.map("Shell.Treeview", background=[("selected", "#332d68")], foreground=[("selected", "#ffffff")])
+        style.map("Shell.Treeview.Heading", background=[("active", PALETTE["surface_3"])])
+        style.configure("Dark.Vertical.TScrollbar", background=PALETTE["surface_3"], troughcolor=PALETTE["surface"], borderwidth=0, arrowcolor=PALETTE["muted"])
 
     def refresh(self) -> None:
         if self.refresh_job is not None:
@@ -106,11 +249,18 @@ class TerminalManagerApp:
 
         self.tree.delete(*self.tree.get_children())
         self.items.clear()
+        query = self.search_var.get().strip().lower()
+        row_index = 0
         covered_windows: set[str] = set()
         for info in sorted(shells, key=lambda item: (item.status == "ended", item.name.lower())):
             window = find_window(info.window_id, self.windows)
             if window:
                 covered_windows.add(info.window_id)
+            searchable = " ".join(
+                (info.name, info.command, info.cwd, info.status, STATUS_LABELS.get(info.status, ""), window.title if window else "")
+            ).lower()
+            if query and query not in searchable:
+                continue
             iid = f"shell:{info.shell_id}"
             self.items[iid] = (info, window)
             self.tree.insert(
@@ -119,16 +269,20 @@ class TerminalManagerApp:
                 iid=iid,
                 values=(
                     info.name,
-                    STATUS_LABELS.get(info.status, info.status),
+                    f"{STATUS_DOTS.get(info.status, '●')}  {STATUS_LABELS.get(info.status, info.status)}",
                     compact(info.command, 46),
                     compact(info.cwd, 54),
                     window.title if window else f"{info.window_id}（未找到）",
                 ),
-                tags=(info.status,),
+                tags=(info.status, "even" if row_index % 2 == 0 else "odd"),
             )
+            row_index += 1
 
         for window in sorted(self.windows, key=lambda item: item.title.lower()):
             if window.window_id in covered_windows:
+                continue
+            searchable = f"{window.title} {window.wm_class} 未注册".lower()
+            if query and query not in searchable:
                 continue
             iid = f"window:{window.window_id}"
             self.items[iid] = (None, window)
@@ -136,15 +290,20 @@ class TerminalManagerApp:
                 "",
                 tk.END,
                 iid=iid,
-                values=(window.title or "终端窗口", "未注册", "—", "—", window.wm_class),
-                tags=("window",),
+                values=(window.title or "终端窗口", "●  未注册", "—", "—", window.wm_class),
+                tags=("window", "even" if row_index % 2 == 0 else "odd"),
             )
+            row_index += 1
 
-        total = len(self.items)
+        unregistered = sum(1 for window in self.windows if window.window_id not in covered_windows)
+        total = len(shells) + unregistered
         running = sum(1 for shell in shells if shell.status == "running")
         idle = sum(1 for shell in shells if shell.status == "idle")
-        unregistered = sum(1 for window in self.windows if window.window_id not in covered_windows)
-        self.summary.configure(text=error or f"共 {total} 项 · 运行 {running} · 空闲 {idle} · 未注册窗口 {unregistered}")
+        values = {"total": total, "running": running, "idle": idle, "unregistered": unregistered}
+        for key, value in values.items():
+            self.metric_values[key].configure(text=str(value))
+        if error:
+            self.details.configure(text=error)
         if selected_shell_id and self.tree.exists(selected_shell_id):
             self.tree.selection_set(selected_shell_id)
         self.update_details()
