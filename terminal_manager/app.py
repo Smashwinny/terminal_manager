@@ -66,6 +66,8 @@ class TerminalManagerApp:
         self._tab_group_misses: dict[str, int] = {}
         self._last_layout_rows: int | None = None
         self._drag_origin: tuple[int, int, int, int] | None = None
+        self.metric_highlight: str | None = None
+        self.focused_window_id: str | None = None
         self.refresh_job: str | None = None
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_args: self.refresh())
@@ -120,6 +122,7 @@ class TerminalManagerApp:
         dashboard = ttk.Frame(container, style="App.TFrame")
         dashboard.pack(fill=tk.X, pady=(0, 16))
         self.metric_values: dict[str, tk.Label] = {}
+        self.metric_cards: dict[str, tk.Frame] = {}
         metrics = (
             ("total", "全部终端", PALETTE["cyan"]),
             ("waiting", "等待用户", STATUS_COLORS["waiting"]),
@@ -144,6 +147,8 @@ class TerminalManagerApp:
             value = tk.Label(card, text="0", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Ubuntu", 20, "bold"))
             value.pack(anchor=tk.W, pady=(4, 0))
             self.metric_values[key] = value
+            self.metric_cards[key] = card
+            self._bind_metric_card(card, key)
 
         surface = tk.Frame(
             container,
@@ -206,6 +211,8 @@ class TerminalManagerApp:
         self.tree.tag_configure("even", background=PALETTE["surface"])
         self.tree.tag_configure("odd", background=PALETTE["surface_2"])
         self.tree.tag_configure("child", background="#0c1524")
+        self.tree.tag_configure("metric_match", background="#2c265c", foreground="#ffffff")
+        self.tree.tag_configure("focused_shell", background="#6557e8", foreground="#ffffff")
         self.tree.bind("<Double-1>", self._handle_tree_double_click)
         self.tree.bind("<ButtonRelease-1>", self._handle_tree_click)
         self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_details())
@@ -348,7 +355,7 @@ class TerminalManagerApp:
                     age_text(activity),
                     signal_text(activity),
                 ),
-                tags=(status, "even" if row_index % 2 == 0 else "odd"),
+                tags=self._row_tags(status, row_index, info is None, window.window_id if window else ""),
                 open=bool(window and window.window_id in expanded_windows),
             )
             row_index += 1
@@ -374,7 +381,7 @@ class TerminalManagerApp:
                             age_text(child_activity),
                             signal_text(child_activity),
                         ),
-                        tags=(child_status, "child"),
+                        tags=self._row_tags(child_status, None, info is None, window.window_id, child=True),
                     )
 
         registered_window_ids = {info.window_id for info in shells}
@@ -386,6 +393,7 @@ class TerminalManagerApp:
         values = {"total": total, "waiting": waiting, "running": running, "idle": idle, "unregistered": unregistered}
         for key, value in values.items():
             self.metric_values[key].configure(text=str(value))
+        self._update_metric_cards()
         if error:
             self.details.configure(text=error)
         active_item = None
@@ -429,6 +437,8 @@ class TerminalManagerApp:
                 return
         if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) == "cell":
             self.root.after_idle(self.focus_selected)
+        elif item_id and self.tree.identify_column(event.x) == "#1" and self.tree.identify_region(event.x, event.y) == "cell":
+            self.root.after_idle(self.focus_selected)
 
     def _handle_tree_double_click(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
@@ -436,6 +446,55 @@ class TerminalManagerApp:
             return "break"
         self.focus_selected()
         return None
+
+    def _bind_metric_card(self, widget: tk.Widget, key: str) -> None:
+        widget.configure(cursor="hand2")
+        widget.bind("<Button-1>", lambda _event, metric=key: self._set_metric_highlight(metric))
+        for child in widget.winfo_children():
+            self._bind_metric_card(child, key)
+
+    def _set_metric_highlight(self, key: str) -> None:
+        self.metric_highlight = None if self.metric_highlight == key else key
+        self.refresh()
+
+    def _update_metric_cards(self) -> None:
+        for key, card in self.metric_cards.items():
+            selected = key == self.metric_highlight
+            background = "#2c265c" if selected else PALETTE["surface"]
+            card.configure(
+                background=background,
+                highlightbackground=PALETTE["accent"] if selected else PALETTE["border"],
+                highlightthickness=2 if selected else 1,
+            )
+            self._set_widget_background(card, background)
+
+    def _set_widget_background(self, widget: tk.Widget, background: str) -> None:
+        for child in widget.winfo_children():
+            try:
+                child.configure(background=background)
+            except tk.TclError:
+                pass
+            self._set_widget_background(child, background)
+
+    def _row_tags(
+        self,
+        status: str,
+        row_index: int | None,
+        unregistered: bool,
+        window_id: str,
+        *,
+        child: bool = False,
+    ) -> tuple[str, ...]:
+        tags: list[str] = [status]
+        if window_id and window_id == self.focused_window_id:
+            tags.append("focused_shell")
+        elif metric_matches(self.metric_highlight, status, unregistered):
+            tags.append("metric_match")
+        elif child:
+            tags.append("child")
+        elif row_index is not None:
+            tags.append("even" if row_index % 2 == 0 else "odd")
+        return tuple(tags)
 
     def _start_window_drag(self, event: tk.Event) -> None:
         self._drag_origin = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
@@ -489,10 +548,22 @@ class TerminalManagerApp:
         window_id = window.window_id if window else shell.window_id if shell else ""
         if not window_id:
             return
+        self.focused_window_id = window_id
+        self._apply_focused_shell_highlight()
+        self.root.update_idletasks()
         try:
             focus_window(window_id, shake=tab_target is None, sync=tab_target is None)
         except X11Error as exc:
             messagebox.showerror("无法进入终端", str(exc), parent=self.root)
+
+    def _apply_focused_shell_highlight(self) -> None:
+        for item_id, (shell, window) in self.items.items():
+            linked_id = window.window_id if window else shell.window_id if shell else ""
+            tags = [tag for tag in self.tree.item(item_id, "tags") if tag != "focused_shell"]
+            if linked_id and linked_id == self.focused_window_id:
+                tags = [tag for tag in tags if tag != "metric_match"]
+                tags.insert(0, "focused_shell")
+            self.tree.item(item_id, tags=tags)
 
     def _harvest_tab_scan(self) -> None:
         if self._tab_scan_result is not None:
@@ -660,6 +731,22 @@ def activity_sort_key(
 ) -> tuple[int, float, str]:
     order = {"waiting": 0, "active": 1, "static": 2}
     return (order.get(status, 3), activity.seconds_in_status if activity else 0.0, name.lower())
+
+
+def metric_matches(metric: str | None, status: str, unregistered: bool) -> bool:
+    if metric is None:
+        return False
+    if metric == "total":
+        return True
+    if metric == "waiting":
+        return status == "waiting"
+    if metric == "running":
+        return status == "active"
+    if metric == "idle":
+        return status == "static"
+    if metric == "unregistered":
+        return unregistered
+    return False
 
 
 def activity_explanation(activity: ActivityState) -> str:
