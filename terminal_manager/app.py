@@ -10,7 +10,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import __version__
-from .activity import ActivityState, WindowActivityTracker
+from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
 from .dialogs import RegistrationDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
@@ -239,7 +239,7 @@ class TerminalManagerApp:
             "cwd": "目录",
             "status": "状态",
             "last_change": "时长",
-            "activity": "标题信号",
+            "activity": "识别依据",
         }
         widths = {"name": 205, "window": 225, "cwd": 265, "status": 110, "last_change": 125, "activity": 145}
         for key in columns:
@@ -1008,13 +1008,18 @@ def display_directory(cwd: str) -> str:
 
 def signal_text(activity: ActivityState | None) -> str:
     if not activity:
-        return "无状态信号"
+        return "窗口不可用"
     if activity.status == "waiting":
-        return f"{activity.prefix} 需要输入"
+        return "明确等待提示"
     if activity.status == "active":
-        source = "已学习动画" if activity.learned_prefix else "Codex 动画"
-        return f"{activity.prefix} {source}"
-    return "无 Codex 状态图标"
+        if activity.prefix in CLAUDE_WORKING_PREFIXES:
+            return "Claude 点动画"
+        if activity.prefix in CODEX_SPINNER_PREFIXES:
+            return "Codex 旋转动画"
+        if activity.learned_prefix:
+            return "自动学习动画"
+        return "Agent 运行信号"
+    return "未检测到 Agent 信号"
 
 
 def age_text(activity: ActivityState | None) -> str:
