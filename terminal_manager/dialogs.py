@@ -118,12 +118,18 @@ class SignalLearningDialog:
 
     def capture(self, status: str) -> None:
         prefix, _body = split_status_prefix(self.current_title)
+        previous_status = next((name for name, values in self.samples.items() if prefix in values and name != status), None)
+        for values in self.samples.values():
+            values.discard(prefix)
         self.samples[status].add(prefix)
         recorded = [status for status, values in self.samples.items() if values]
         labels = {"static": "静态", "active": "输出中", "waiting": "等待用户"}
-        self.progress_label.configure(text=f"已记录 {len(recorded)} / 3 个状态：{'、'.join(labels[value] for value in recorded)}")
+        moved = f"；相同信号已从{labels[previous_status]}移到{labels[status]}" if previous_status else ""
+        self.progress_label.configure(text=f"已记录 {len(recorded)} / 3 个状态：{'、'.join(labels[value] for value in recorded)}{moved}")
         if len(recorded) >= 2:
             self.save_button.configure(state=tk.NORMAL)
+        else:
+            self.save_button.configure(state=tk.DISABLED)
 
     def save(self) -> None:
         if sum(bool(values) for values in self.samples.values()) < 2:

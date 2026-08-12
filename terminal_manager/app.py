@@ -21,6 +21,7 @@ from .store import (
     load_tty_bindings,
     remove_shell,
     save_learned_protocol,
+    assign_learned_signal,
     save_shell,
     save_tty_binding,
 )
@@ -961,7 +962,8 @@ class TerminalManagerApp:
             return
         protocol = load_learned_protocol()
         for status, prefixes in dialog.result.items():
-            protocol[status].update(prefixes)
+            for prefix in prefixes:
+                assign_learned_signal(protocol, status, prefix)
         for tracker in (self.activity_tracker, self.tab_activity_tracker):
             tracker.learned_spinner_prefixes = set(protocol["active"])
             tracker.learned_waiting_prefixes = set(protocol["waiting"])

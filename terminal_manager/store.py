@@ -29,11 +29,11 @@ def load_learned_protocol() -> dict[str, set[str]]:
     try:
         data = json.loads(learned_signals_path().read_text(encoding="utf-8"))
         if data.get("version") == 1:
-            return {"active": {str(value) for value in data.get("prefixes", []) if len(str(value)) == 1}, "waiting": set(), "static": set()}
+            return normalize_learned_protocol({"active": {str(value) for value in data.get("prefixes", []) if len(str(value)) == 1}, "waiting": set(), "static": set()})
         if data.get("version") != LEARNED_SIGNALS_VERSION:
             return {"active": set(), "waiting": set(), "static": set()}
         states = data.get("states", {})
-        return {status: {str(value) for value in states.get(status, []) if len(str(value)) <= 1} for status in ("active", "waiting", "static")}
+        return normalize_learned_protocol({status: {str(value) for value in states.get(status, []) if len(str(value)) <= 1} for status in ("active", "waiting", "static")})
     except (OSError, AttributeError, ValueError, TypeError, json.JSONDecodeError):
         return {"active": set(), "waiting": set(), "static": set()}
 
@@ -49,12 +49,29 @@ def save_learned_signals(prefixes: set[str]) -> None:
 
 
 def save_learned_protocol(protocol: dict[str, set[str]]) -> None:
+    protocol = normalize_learned_protocol(protocol)
     target = learned_signals_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
     payload = {"version": LEARNED_SIGNALS_VERSION, "states": {status: sorted(protocol.get(status, set())) for status in ("active", "waiting", "static")}}
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(target)
+
+
+def assign_learned_signal(protocol: dict[str, set[str]], status: str, prefix: str) -> None:
+    for values in protocol.values():
+        values.discard(prefix)
+    protocol[status].add(prefix)
+
+
+def normalize_learned_protocol(protocol: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Ensure one title signal cannot drive multiple thermal states."""
+    normalized = {status: set(protocol.get(status, set())) for status in ("active", "static", "waiting")}
+    # Existing ambiguous files resolve conservatively: waiting, then static,
+    # then active. New UI assignments always use last-choice-wins instead.
+    normalized["static"] -= normalized["waiting"]
+    normalized["active"] -= normalized["waiting"] | normalized["static"]
+    return normalized
 
 
 def load_tty_bindings() -> dict[str, dict[str, str]]:
