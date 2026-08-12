@@ -125,16 +125,24 @@ class SignalLearningSession:
         self.threshold = max(2, threshold)
         self.body = ""
         self.prefixes: set[str] = set()
+        self.kind = ""
 
     def observe(self, title: str) -> bool:
         prefix, body = split_status_prefix(title)
         if not prefix or not body:
             return False
-        if prefix in CODEX_SPINNER_PREFIXES or prefix in CLAUDE_WORKING_PREFIXES or prefix in WAITING_PREFIXES:
+        if prefix in WAITING_PREFIXES:
             return False
-        if self.body and body != self.body:
+        if prefix in CODEX_SPINNER_PREFIXES:
+            kind = "codex"
+        elif prefix in CLAUDE_WORKING_PREFIXES:
+            kind = "claude"
+        else:
+            kind = "unknown"
+        if (self.body and body != self.body) or (self.kind and kind != self.kind):
             self.prefixes.clear()
         self.body = body
+        self.kind = kind
         self.prefixes.add(prefix)
         return len(self.prefixes) >= self.threshold
 

@@ -61,6 +61,21 @@ def test_unknown_rotating_prefix_is_learned() -> None:
     assert learned.status == "active" and learned.learned_prefix
 
 
+def test_manual_learning_collects_both_claude_frames() -> None:
+    session = SignalLearningSession()
+    assert not session.observe("⠂ Claude project")
+    assert session.observe("⠐ Claude project")
+    assert session.prefixes == {"⠂", "⠐"}
+
+
+def test_static_star_is_not_mixed_with_claude_animation() -> None:
+    session = SignalLearningSession()
+    assert not session.observe("✳ Claude project")
+    assert not session.observe("⠂ Claude project")
+    assert session.prefixes == {"⠂"}
+    assert session.observe("⠐ Claude project")
+
+
 def test_title_rename_is_not_learned_as_animation() -> None:
     session = SignalLearningSession(threshold=3)
     session.observe("A project")
