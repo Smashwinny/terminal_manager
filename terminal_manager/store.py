@@ -9,7 +9,7 @@ from .model import ShellInfo
 
 
 TTY_BINDINGS_VERSION = 2
-LEARNED_SIGNALS_VERSION = 1
+LEARNED_SIGNALS_VERSION = 2
 
 
 def state_dir() -> Path:
@@ -25,21 +25,34 @@ def learned_signals_path() -> Path:
     return state_dir().parent / "learned-signals.json"
 
 
-def load_learned_signals() -> set[str]:
+def load_learned_protocol() -> dict[str, set[str]]:
     try:
         data = json.loads(learned_signals_path().read_text(encoding="utf-8"))
+        if data.get("version") == 1:
+            return {"active": {str(value) for value in data.get("prefixes", []) if len(str(value)) == 1}, "waiting": set(), "static": set()}
         if data.get("version") != LEARNED_SIGNALS_VERSION:
-            return set()
-        return {str(value) for value in data.get("prefixes", []) if len(str(value)) == 1}
+            return {"active": set(), "waiting": set(), "static": set()}
+        states = data.get("states", {})
+        return {status: {str(value) for value in states.get(status, []) if len(str(value)) <= 1} for status in ("active", "waiting", "static")}
     except (OSError, AttributeError, ValueError, TypeError, json.JSONDecodeError):
-        return set()
+        return {"active": set(), "waiting": set(), "static": set()}
+
+
+def load_learned_signals() -> set[str]:
+    return load_learned_protocol()["active"]
 
 
 def save_learned_signals(prefixes: set[str]) -> None:
+    protocol = load_learned_protocol()
+    protocol["active"] = set(prefixes)
+    save_learned_protocol(protocol)
+
+
+def save_learned_protocol(protocol: dict[str, set[str]]) -> None:
     target = learned_signals_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
-    payload = {"version": LEARNED_SIGNALS_VERSION, "prefixes": sorted(prefixes)}
+    payload = {"version": LEARNED_SIGNALS_VERSION, "states": {status: sorted(protocol.get(status, set())) for status in ("active", "waiting", "static")}}
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(target)
 

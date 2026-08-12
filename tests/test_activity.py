@@ -51,6 +51,12 @@ def test_claude_without_reliable_waiting_signal_falls_back_to_static() -> None:
     assert waiting.status == "waiting"
 
 
+def test_explicit_waiting_text_overrides_learned_blank_static_prefix() -> None:
+    tracker = WindowActivityTracker(learned_static_prefixes={""}, static_grace_seconds=0)
+    state = tracker.update([window("Action Required | project")])["0x0000002a"]
+    assert state.status == "waiting"
+
+
 def test_unknown_rotating_prefix_is_learned() -> None:
     session = SignalLearningSession(threshold=3)
     assert not session.observe("◐ project")

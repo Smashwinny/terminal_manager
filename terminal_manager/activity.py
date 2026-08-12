@@ -59,9 +59,13 @@ class WindowActivityTracker:
         self,
         static_grace_seconds: float = 6.0,
         learned_prefixes: set[str] | None = None,
+        learned_waiting_prefixes: set[str] | None = None,
+        learned_static_prefixes: set[str] | None = None,
     ) -> None:
         self.static_grace_seconds = max(0.0, static_grace_seconds)
         self.learned_spinner_prefixes: set[str] = set(learned_prefixes or ())
+        self.learned_waiting_prefixes = set(learned_waiting_prefixes or ())
+        self.learned_static_prefixes = set(learned_static_prefixes or ())
         self._history: dict[str, _History] = {}
 
     def update(self, windows: list[WindowInfo]) -> dict[str, ActivityState]:
@@ -108,8 +112,10 @@ class WindowActivityTracker:
         return states
 
     def _classify(self, prefix: str, body: str) -> str:
-        if prefix in WAITING_PREFIXES or has_waiting_body_marker(body):
+        if prefix in WAITING_PREFIXES or prefix in self.learned_waiting_prefixes or has_waiting_body_marker(body):
             return "waiting"
+        if prefix in self.learned_static_prefixes:
+            return "static"
         if (
             prefix in CODEX_SPINNER_PREFIXES
             or prefix in CLAUDE_WORKING_PREFIXES

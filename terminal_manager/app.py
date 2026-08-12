@@ -16,11 +16,11 @@ from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
 from .store import (
-    load_learned_signals,
+    load_learned_protocol,
     load_shells,
     load_tty_bindings,
     remove_shell,
-    save_learned_signals,
+    save_learned_protocol,
     save_shell,
     save_tty_binding,
 )
@@ -78,9 +78,14 @@ class TerminalManagerApp:
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
         self.activities: dict[str, ActivityState] = {}
-        learned_signals = load_learned_signals()
-        self.activity_tracker = WindowActivityTracker(learned_prefixes=learned_signals)
-        self.tab_activity_tracker = WindowActivityTracker(learned_prefixes=learned_signals)
+        learned_protocol = load_learned_protocol()
+        tracker_options = {
+            "learned_prefixes": learned_protocol["active"],
+            "learned_waiting_prefixes": learned_protocol["waiting"],
+            "learned_static_prefixes": learned_protocol["static"],
+        }
+        self.activity_tracker = WindowActivityTracker(**tracker_options)
+        self.tab_activity_tracker = WindowActivityTracker(**tracker_options)
         self.thermal_tracker = ThermalTracker()
         self.thermal_levels: dict[str, float] = {}
         self.tab_groups: dict[str, TabGroup] = {}
@@ -954,11 +959,16 @@ class TerminalManagerApp:
         dialog = SignalLearningDialog(self.root, window_title=current_title, palette=PALETTE)
         if not dialog.result:
             return
-        learned = self.activity_tracker.learned_spinner_prefixes | dialog.result
-        self.activity_tracker.learned_spinner_prefixes = set(learned)
-        self.tab_activity_tracker.learned_spinner_prefixes = set(learned)
-        save_learned_signals(learned)
-        self.details.configure(text=f"已保存标题动画：{'  '.join(sorted(dialog.result))}。重启后仍然有效。")
+        protocol = load_learned_protocol()
+        for status, prefixes in dialog.result.items():
+            protocol[status].update(prefixes)
+        for tracker in (self.activity_tracker, self.tab_activity_tracker):
+            tracker.learned_spinner_prefixes = set(protocol["active"])
+            tracker.learned_waiting_prefixes = set(protocol["waiting"])
+            tracker.learned_static_prefixes = set(protocol["static"])
+        save_learned_protocol(protocol)
+        recorded = sum(bool(values) for values in dialog.result.values())
+        self.details.configure(text=f"已保存 {recorded} 个 Agent 状态；重启后仍然有效。")
         self.refresh()
 
     def register_selected(self) -> None:
