@@ -57,6 +57,11 @@ def test_explicit_waiting_text_overrides_learned_blank_static_prefix() -> None:
     assert state.status == "waiting"
 
 
+def test_user_rule_can_override_builtin_agent_prefix() -> None:
+    tracker = WindowActivityTracker(learned_static_prefixes={"⠹"}, static_grace_seconds=0)
+    assert tracker.update([window("⠹ project")])["0x0000002a"].status == "static"
+
+
 def test_unknown_rotating_prefix_is_learned() -> None:
     session = SignalLearningSession(threshold=3)
     assert not session.observe("◐ project")

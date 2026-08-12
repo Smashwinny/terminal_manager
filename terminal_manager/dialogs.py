@@ -3,7 +3,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from .activity import split_status_prefix
+from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, WAITING_PREFIXES, split_status_prefix
+from .store import assign_learned_signal
 
 class RegistrationDialog:
     def __init__(
@@ -135,6 +136,97 @@ class SignalLearningDialog:
         if sum(bool(values) for values in self.samples.values()) < 2:
             return
         self.result = {status: set(values) for status, values in self.samples.items()}
+        self.window.destroy()
+
+    def cancel(self) -> None:
+        self.window.destroy()
+
+
+class SignalManagementDialog:
+    LABELS = {"static": "静态", "active": "输出中", "waiting": "等待用户"}
+
+    def __init__(self, parent: tk.Misc, *, protocol: dict[str, set[str]], palette: dict[str, str]) -> None:
+        self.result: dict[str, set[str]] | None = None
+        self.protocol = {status: set(protocol.get(status, set())) for status in self.LABELS}
+        self.window = tk.Toplevel(parent)
+        self.window.title("信号管理")
+        self.window.configure(background=palette["bg"])
+        self.window.geometry("720x510")
+        self.window.minsize(620, 430)
+        self.window.transient(parent)
+        self.window.grab_set()
+        body = tk.Frame(self.window, background=palette["bg"], padx=22, pady=20)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(body, text="Agent 信号管理", background=palette["bg"], foreground=palette["text"], font=("Noto Sans CJK SC", 15, "bold")).pack(anchor=tk.W)
+        self.summary = tk.Label(body, background=palette["bg"], foreground=palette["muted"], font=("Noto Sans CJK SC", 9))
+        self.summary.pack(anchor=tk.W, pady=(4, 14))
+        self.tree = ttk.Treeview(body, columns=("signal", "status", "source"), show="headings", selectmode="browse", height=12)
+        for key, label, width in (("signal", "标题信号", 170), ("status", "对应状态", 160), ("source", "来源", 280)):
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, anchor=tk.W)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        actions = tk.Frame(body, background=palette["bg"])
+        actions.pack(fill=tk.X, pady=(12, 0))
+        for status, label in (("static", "改为静态"), ("active", "改为输出中"), ("waiting", "改为等待用户")):
+            ttk.Button(actions, text=label, style="Ghost.TButton", command=lambda value=status: self.move_selected(value)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="删除用户规则", style="Danger.TButton", command=self.delete_selected).pack(side=tk.LEFT)
+        footer = tk.Frame(body, background=palette["bg"])
+        footer.pack(fill=tk.X, pady=(16, 0))
+        ttk.Button(footer, text="取消", style="Ghost.TButton", command=self.cancel).pack(side=tk.RIGHT)
+        ttk.Button(footer, text="保存修改", style="Accent.TButton", command=self.save).pack(side=tk.RIGHT, padx=(0, 8))
+        self.window.protocol("WM_DELETE_WINDOW", self.cancel)
+        self._render()
+        parent.wait_window(self.window)
+
+    def _render(self) -> None:
+        selected_signal = None
+        selection = self.tree.selection()
+        if selection:
+            selected_signal = self.tree.item(selection[0], "values")[0]
+            if selected_signal == "（无前缀）":
+                selected_signal = ""
+        self.tree.delete(*self.tree.get_children())
+        overridden = set().union(*self.protocol.values())
+        builtins = {
+            "active": set(CODEX_SPINNER_PREFIXES | CLAUDE_WORKING_PREFIXES) - overridden,
+            "waiting": set(WAITING_PREFIXES) - overridden,
+            "static": set(),
+        }
+        counts = {status: len(self.protocol[status] | builtins[status]) for status in self.LABELS}
+        self.summary.configure(text="  ·  ".join(f"{self.LABELS[status]} {counts[status]} 个" for status in ("static", "active", "waiting")))
+        for status in ("waiting", "active", "static"):
+            for signal in sorted(builtins[status]):
+                self.tree.insert("", tk.END, values=(signal, self.LABELS[status], "内置规则"), tags=("builtin",))
+            for signal in sorted(self.protocol[status]):
+                iid = f"user:{status}:{ord(signal) if signal else 0}"
+                self.tree.insert("", tk.END, iid=iid, values=(signal or "（无前缀）", self.LABELS[status], "用户学习 · 可修改"))
+                if signal == selected_signal:
+                    self.tree.selection_set(iid)
+
+    def _selected_user_signal(self) -> str | None:
+        selection = self.tree.selection()
+        if not selection or not selection[0].startswith("user:"):
+            return None
+        value = self.tree.item(selection[0], "values")[0]
+        return "" if value == "（无前缀）" else value
+
+    def move_selected(self, status: str) -> None:
+        signal = self._selected_user_signal()
+        if signal is None:
+            return
+        assign_learned_signal(self.protocol, status, signal)
+        self._render()
+
+    def delete_selected(self) -> None:
+        signal = self._selected_user_signal()
+        if signal is None:
+            return
+        for values in self.protocol.values():
+            values.discard(signal)
+        self._render()
+
+    def save(self) -> None:
+        self.result = {status: set(values) for status, values in self.protocol.items()}
         self.window.destroy()
 
     def cancel(self) -> None:

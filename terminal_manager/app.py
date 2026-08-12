@@ -11,7 +11,7 @@ from tkinter import messagebox, ttk
 
 from . import __version__
 from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
-from .dialogs import RegistrationDialog, SignalLearningDialog
+from .dialogs import RegistrationDialog, SignalLearningDialog, SignalManagementDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
@@ -173,6 +173,7 @@ class TerminalManagerApp:
         for widget in (self.thermal_toggle, self.thermal_indicator, self.thermal_label):
             widget.bind("<Button-1>", lambda _event: self._toggle_thermal_rendering())
         self._draw_thermal_toggle()
+        ttk.Button(header_actions, text="信号管理", style="Ghost.TButton", command=self.manage_signals).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="登记窗口", style="Ghost.TButton", command=self.register_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
 
@@ -971,6 +972,18 @@ class TerminalManagerApp:
         save_learned_protocol(protocol)
         recorded = sum(bool(values) for values in dialog.result.values())
         self.details.configure(text=f"已保存 {recorded} 个 Agent 状态；重启后仍然有效。")
+        self.refresh()
+
+    def manage_signals(self) -> None:
+        dialog = SignalManagementDialog(self.root, protocol=load_learned_protocol(), palette=PALETTE)
+        if dialog.result is None:
+            return
+        save_learned_protocol(dialog.result)
+        for tracker in (self.activity_tracker, self.tab_activity_tracker):
+            tracker.learned_spinner_prefixes = set(dialog.result["active"])
+            tracker.learned_waiting_prefixes = set(dialog.result["waiting"])
+            tracker.learned_static_prefixes = set(dialog.result["static"])
+        self.details.configure(text="信号规则已更新；新的状态与温度处理立即生效。")
         self.refresh()
 
     def register_selected(self) -> None:

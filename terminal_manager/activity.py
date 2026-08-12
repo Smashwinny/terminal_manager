@@ -112,14 +112,19 @@ class WindowActivityTracker:
         return states
 
     def _classify(self, prefix: str, body: str) -> str:
-        if prefix in WAITING_PREFIXES or prefix in self.learned_waiting_prefixes or has_waiting_body_marker(body):
+        if has_waiting_body_marker(body):
+            return "waiting"
+        if prefix in self.learned_waiting_prefixes:
             return "waiting"
         if prefix in self.learned_static_prefixes:
             return "static"
+        if prefix in self.learned_spinner_prefixes:
+            return "active"
+        if prefix in WAITING_PREFIXES:
+            return "waiting"
         if (
             prefix in CODEX_SPINNER_PREFIXES
             or prefix in CLAUDE_WORKING_PREFIXES
-            or prefix in self.learned_spinner_prefixes
         ):
             return "active"
         return "static"
