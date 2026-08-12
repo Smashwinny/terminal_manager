@@ -69,6 +69,21 @@ def active_window_id() -> str:
         raise X11Error("无法读取当前活动窗口") from exc
 
 
+def window_title(window_id: str) -> str | None:
+    require_x11()
+    try:
+        result = subprocess.run(
+            ["xdotool", "getwindowname", normalize_window_id(window_id)],
+            text=True,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
+    return result.stdout.rstrip("\n") if result.returncode == 0 else None
+
+
 def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> None:
     require_x11()
     wid = normalize_window_id(window_id)

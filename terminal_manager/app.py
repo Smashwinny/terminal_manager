@@ -11,15 +11,23 @@ from tkinter import messagebox, ttk
 
 from . import __version__
 from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
-from .dialogs import RegistrationDialog
+from .dialogs import RegistrationDialog, SignalLearningDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
-from .store import load_shells, load_tty_bindings, remove_shell, save_shell, save_tty_binding
+from .store import (
+    load_learned_signals,
+    load_shells,
+    load_tty_bindings,
+    remove_shell,
+    save_learned_signals,
+    save_shell,
+    save_tty_binding,
+)
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty, terminal_tty_cwds
-from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows
+from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows, window_title
 
 
 STATUS_COLORS = {
@@ -70,8 +78,9 @@ class TerminalManagerApp:
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
         self.activities: dict[str, ActivityState] = {}
-        self.activity_tracker = WindowActivityTracker()
-        self.tab_activity_tracker = WindowActivityTracker()
+        learned_signals = load_learned_signals()
+        self.activity_tracker = WindowActivityTracker(learned_prefixes=learned_signals)
+        self.tab_activity_tracker = WindowActivityTracker(learned_prefixes=learned_signals)
         self.thermal_tracker = ThermalTracker()
         self.thermal_levels: dict[str, float] = {}
         self.tab_groups: dict[str, TabGroup] = {}
@@ -268,6 +277,7 @@ class TerminalManagerApp:
         actions.pack(side=tk.LEFT)
         ttk.Button(actions, text="进入并高亮", style="Accent.TButton", command=self.focus_selected).pack(side=tk.LEFT)
         ttk.Button(actions, text="编辑记录", style="Ghost.TButton", command=self.rename_selected).pack(side=tk.LEFT, padx=8)
+        ttk.Button(actions, text="学习信号", style="Ghost.TButton", command=self.learn_selected_signal).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="移除记录", style="Danger.TButton", command=self.remove_selected).pack(side=tk.LEFT)
         tk.Label(footer, text="自动刷新  2s", foreground=PALETTE["subtle"], background=PALETTE["surface"], font=("Ubuntu", 9)).pack(side=tk.RIGHT)
 
@@ -924,6 +934,32 @@ class TerminalManagerApp:
             self.register_selected()
             return
         self.edit_record(shell, window)
+
+    def learn_selected_signal(self) -> None:
+        selected = self.selected()
+        if not selected:
+            messagebox.showinfo("学习标题信号", "请先选择需要学习的终端窗口。", parent=self.root)
+            return
+        _iid, shell, window = selected
+        window_id = window.window_id if window else shell.window_id if shell else ""
+        if not window_id:
+            return
+
+        def current_title() -> str | None:
+            try:
+                return window_title(window_id)
+            except X11Error:
+                return ""
+
+        dialog = SignalLearningDialog(self.root, window_title=current_title, palette=PALETTE)
+        if not dialog.result:
+            return
+        learned = self.activity_tracker.learned_spinner_prefixes | dialog.result
+        self.activity_tracker.learned_spinner_prefixes = set(learned)
+        self.tab_activity_tracker.learned_spinner_prefixes = set(learned)
+        save_learned_signals(learned)
+        self.details.configure(text=f"已保存标题动画：{'  '.join(sorted(dialog.result))}。重启后仍然有效。")
+        self.refresh()
 
     def register_selected(self) -> None:
         selected = self.selected()

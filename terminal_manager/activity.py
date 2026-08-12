@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .model import WindowInfo
 
@@ -43,8 +43,6 @@ class _History:
     status: str
     status_since: float
     samples: int = 1
-    candidate_body: str = ""
-    candidate_prefixes: set[str] = field(default_factory=set)
     pending_static_since: float | None = None
 
 
@@ -57,10 +55,13 @@ class WindowActivityTracker:
     affect this signal.
     """
 
-    def __init__(self, learning_threshold: int = 3, static_grace_seconds: float = 6.0) -> None:
-        self.learning_threshold = max(2, learning_threshold)
+    def __init__(
+        self,
+        static_grace_seconds: float = 6.0,
+        learned_prefixes: set[str] | None = None,
+    ) -> None:
         self.static_grace_seconds = max(0.0, static_grace_seconds)
-        self.learned_spinner_prefixes: set[str] = set()
+        self.learned_spinner_prefixes: set[str] = set(learned_prefixes or ())
         self._history: dict[str, _History] = {}
 
     def update(self, windows: list[WindowInfo]) -> dict[str, ActivityState]:
@@ -77,7 +78,6 @@ class WindowActivityTracker:
                 self._history[window.window_id] = previous
             else:
                 previous.samples += 1
-                self._learn_animation(previous, prefix, body)
                 status = self._classify(prefix, body)
                 display_prefix = prefix
                 if status == "static" and previous.status in ("active", "waiting"):
@@ -118,17 +118,25 @@ class WindowActivityTracker:
             return "active"
         return "static"
 
-    def _learn_animation(self, history: _History, prefix: str, body: str) -> None:
-        if not prefix or not body or body != history.body or prefix == history.prefix:
-            history.candidate_body = body
-            history.candidate_prefixes.clear()
-            return
-        if history.candidate_body != body:
-            history.candidate_body = body
-            history.candidate_prefixes = {history.prefix}
-        history.candidate_prefixes.add(prefix)
-        if len(history.candidate_prefixes) >= self.learning_threshold:
-            self.learned_spinner_prefixes.update(history.candidate_prefixes)
+class SignalLearningSession:
+    """Collect unknown animation frames from one explicitly selected window."""
+
+    def __init__(self, threshold: int = 2) -> None:
+        self.threshold = max(2, threshold)
+        self.body = ""
+        self.prefixes: set[str] = set()
+
+    def observe(self, title: str) -> bool:
+        prefix, body = split_status_prefix(title)
+        if not prefix or not body:
+            return False
+        if prefix in CODEX_SPINNER_PREFIXES or prefix in CLAUDE_WORKING_PREFIXES or prefix in WAITING_PREFIXES:
+            return False
+        if self.body and body != self.body:
+            self.prefixes.clear()
+        self.body = body
+        self.prefixes.add(prefix)
+        return len(self.prefixes) >= self.threshold
 
 
 def split_status_prefix(title: str) -> tuple[str, str]:

@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from terminal_manager.activity import WindowActivityTracker, has_waiting_body_marker, split_status_prefix
+from terminal_manager.activity import SignalLearningSession, WindowActivityTracker, has_waiting_body_marker, split_status_prefix
 from terminal_manager.model import WindowInfo
 
 
@@ -52,22 +52,21 @@ def test_claude_without_reliable_waiting_signal_falls_back_to_static() -> None:
 
 
 def test_unknown_rotating_prefix_is_learned() -> None:
-    tracker = WindowActivityTracker(learning_threshold=3)
-    assert tracker.update([window("◐ project")])["0x0000002a"].status == "static"
-    assert tracker.update([window("◓ project")])["0x0000002a"].status == "static"
-    learned = tracker.update([window("◑ project")])["0x0000002a"]
-    assert learned.status == "active"
-    assert learned.learned_prefix
-    assert {"◐", "◓", "◑"} <= tracker.learned_spinner_prefixes
+    session = SignalLearningSession(threshold=3)
+    assert not session.observe("◐ project")
+    assert not session.observe("◓ project")
+    assert session.observe("◑ project")
+    tracker = WindowActivityTracker(learned_prefixes=session.prefixes, static_grace_seconds=0)
+    learned = tracker.update([window("◐ project")])["0x0000002a"]
+    assert learned.status == "active" and learned.learned_prefix
 
 
 def test_title_rename_is_not_learned_as_animation() -> None:
-    tracker = WindowActivityTracker(learning_threshold=3)
-    tracker.update([window("A project")])
-    tracker.update([window("B another-project")])
-    state = tracker.update([window("C third-project")])["0x0000002a"]
-    assert state.status == "static"
-    assert not tracker.learned_spinner_prefixes
+    session = SignalLearningSession(threshold=3)
+    session.observe("A project")
+    session.observe("B another-project")
+    assert not session.observe("C third-project")
+    assert session.prefixes == {"C"}
 
 
 @patch("terminal_manager.activity.time.monotonic", side_effect=[0.0, 1.0, 2.0])

@@ -9,6 +9,7 @@ from .model import ShellInfo
 
 
 TTY_BINDINGS_VERSION = 2
+LEARNED_SIGNALS_VERSION = 1
 
 
 def state_dir() -> Path:
@@ -18,6 +19,29 @@ def state_dir() -> Path:
 
 def tty_bindings_path() -> Path:
     return state_dir().parent / "tty-bindings.json"
+
+
+def learned_signals_path() -> Path:
+    return state_dir().parent / "learned-signals.json"
+
+
+def load_learned_signals() -> set[str]:
+    try:
+        data = json.loads(learned_signals_path().read_text(encoding="utf-8"))
+        if data.get("version") != LEARNED_SIGNALS_VERSION:
+            return set()
+        return {str(value) for value in data.get("prefixes", []) if len(str(value)) == 1}
+    except (OSError, AttributeError, ValueError, TypeError, json.JSONDecodeError):
+        return set()
+
+
+def save_learned_signals(prefixes: set[str]) -> None:
+    target = learned_signals_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    payload = {"version": LEARNED_SIGNALS_VERSION, "prefixes": sorted(prefixes)}
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(target)
 
 
 def load_tty_bindings() -> dict[str, dict[str, str]]:
