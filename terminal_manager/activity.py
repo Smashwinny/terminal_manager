@@ -10,6 +10,11 @@ from .model import WindowInfo
 # Unknown animations are learned below, so a future Codex spinner does not
 # require an application release as long as it keeps the same title protocol.
 CODEX_SPINNER_PREFIXES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+# Claude Code moves one Braille dot while processing. Its current animation can
+# expose only two distinct frames (for example ⠂ and ⠐), so the generic
+# three-frame learner cannot discover it reliably. A sampled frame may also
+# appear stationary; every single-dot Braille cell is therefore active.
+CLAUDE_WORKING_PREFIXES = frozenset("⠁⠂⠄⠈⠐⠠⡀⢀")
 WAITING_PREFIXES = frozenset(("!", "！", "❗", "⚠"))
 WAITING_TITLE_MARKERS = ("[ ! ]", "[！]", "[!]", "❗", "⚠")
 WAITING_BODY_MARKERS = (
@@ -105,7 +110,11 @@ class WindowActivityTracker:
     def _classify(self, prefix: str, body: str) -> str:
         if prefix in WAITING_PREFIXES or has_waiting_body_marker(body):
             return "waiting"
-        if prefix in CODEX_SPINNER_PREFIXES or prefix in self.learned_spinner_prefixes:
+        if (
+            prefix in CODEX_SPINNER_PREFIXES
+            or prefix in CLAUDE_WORKING_PREFIXES
+            or prefix in self.learned_spinner_prefixes
+        ):
             return "active"
         return "static"
 

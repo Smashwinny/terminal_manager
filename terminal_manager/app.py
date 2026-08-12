@@ -1056,7 +1056,7 @@ def activity_explanation(activity: ActivityState) -> str:
     if activity.status == "waiting":
         return f"等待用户：Codex 在窗口标题中显示“{activity.prefix}”，已等待 {duration:.1f} 秒。"
     if activity.status == "active":
-        source = "自动学习到的动画前缀" if activity.learned_prefix else "Codex 标准动画前缀"
+        source = "自动学习到的动画前缀" if activity.learned_prefix else "Codex/Claude Code 标准运行前缀"
         return f"正在输出：窗口标题正在显示{source}“{activity.prefix}”，已持续 {duration:.1f} 秒。"
     if activity.status == "static":
         return f"静态/空闲：窗口标题没有 Codex 状态图标，已持续 {duration:.1f} 秒。"

@@ -37,6 +37,20 @@ def test_known_codex_states(_clock) -> None:
     assert static.status == "static"
 
 
+def test_claude_working_prefix_uses_same_active_state_as_codex() -> None:
+    tracker = WindowActivityTracker(static_grace_seconds=0)
+    for prefix in "⠁⠂⠄⠈⠐⠠⡀⢀":
+        state = tracker.update([window(f"{prefix} Claude project")])["0x0000002a"]
+        assert state.status == "active"
+
+
+def test_claude_without_reliable_waiting_signal_falls_back_to_static() -> None:
+    tracker = WindowActivityTracker(static_grace_seconds=0)
+    assert tracker.update([window("✳ Claude project")])["0x0000002a"].status == "static"
+    waiting = tracker.update([window("Action Required | Claude project")])["0x0000002a"]
+    assert waiting.status == "waiting"
+
+
 def test_unknown_rotating_prefix_is_learned() -> None:
     tracker = WindowActivityTracker(learning_threshold=3)
     assert tracker.update([window("◐ project")])["0x0000002a"].status == "static"
