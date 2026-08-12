@@ -5,6 +5,7 @@ import tkinter as tk
 import threading
 import uuid
 import os
+import sys
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -327,6 +328,21 @@ class TerminalManagerApp:
         if self.refresh_job is not None:
             self.root.after_cancel(self.refresh_job)
             self.refresh_job = None
+        try:
+            self._refresh_once()
+        except Exception as exc:
+            # A periodic UI callback must always schedule its successor. Log
+            # unexpected failures and keep the last rendered snapshot intact.
+            print(f"Terminal Manager 刷新失败：{exc}", file=sys.stderr, flush=True)
+            try:
+                self.details.configure(text=f"刷新失败：{exc}；将在 2 秒后自动重试。")
+            except tk.TclError:
+                pass
+        finally:
+            if self.root.winfo_exists():
+                self.refresh_job = self.root.after(2000, self.refresh)
+
+    def _refresh_once(self) -> None:
         selected_shell_id = None
         selection = self.tree.selection()
         if selection:
@@ -482,7 +498,6 @@ class TerminalManagerApp:
             self._sync_selected_style()
         self.update_details()
         self._adapt_window_height()
-        self.refresh_job = self.root.after(2000, self.refresh)
 
     def _poll_active_window(self) -> None:
         """Track focus cheaply so reverse highlighting is independent of full refreshes."""

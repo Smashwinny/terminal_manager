@@ -46,9 +46,12 @@ def parse_wmctrl_line(line: str) -> WindowInfo | None:
 
 def list_windows() -> list[WindowInfo]:
     require_x11()
-    result = subprocess.run(
-        ["wmctrl", "-lpGx"], text=True, capture_output=True, timeout=3, check=False
-    )
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-lpGx"], text=True, capture_output=True, timeout=3, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise X11Error("wmctrl 读取窗口列表超时") from exc
     if result.returncode != 0:
         raise X11Error(result.stderr.strip() or "wmctrl 无法读取窗口列表")
     windows = [parse_wmctrl_line(line) for line in result.stdout.splitlines()]
