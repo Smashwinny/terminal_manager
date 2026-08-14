@@ -16,6 +16,8 @@ MAX_SAMPLE_GAP_SECONDS = 10.0
 class _Temperature:
     value: float
     updated_at: float
+    status: str
+    cooling_rate: float = 0.0
 
 
 class ThermalTracker:
@@ -30,16 +32,23 @@ class ThermalTracker:
         for item_id, status in statuses.items():
             item = self._items.get(item_id)
             if item is None:
-                item = _Temperature(0.0, timestamp)
+                item = _Temperature(0.0, timestamp, status)
                 self._items[item_id] = item
             # Long GUI stalls (for example a modal edit dialog or desktop
             # suspension) are unobserved time, not evidence of continuous
             # output. Cap one sample so heat cannot jump to red at once.
             elapsed = min(self.max_sample_gap_seconds, max(0.0, timestamp - item.updated_at))
+            status_changed = status != item.status
+            if status_changed:
+                item.status = status
+                item.cooling_rate = item.value / COOL_SECONDS if status == "static" else 0.0
+                # The transition sample establishes the cooling start point;
+                # no unobserved time before it belongs to the new status.
+                elapsed = 0.0
             if status == "active":
                 item.value = min(1.0, item.value + elapsed / HEAT_SECONDS)
             elif status == "static":
-                item.value = max(0.0, item.value - elapsed / COOL_SECONDS)
+                item.value = max(0.0, item.value - elapsed * item.cooling_rate)
             # waiting deliberately preserves the accumulated temperature.
             item.updated_at = timestamp
 

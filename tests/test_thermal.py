@@ -13,8 +13,18 @@ def test_static_cools_and_waiting_holds() -> None:
     tracker.update({"a": "active"}, now=0)
     tracker.update({"a": "active"}, now=600)
     assert tracker.update({"a": "waiting"}, now=900)["a"] == 1
-    assert tracker.update({"a": "static"}, now=1080)["a"] == 0.5
-    assert tracker.update({"a": "static"}, now=1260)["a"] == 0
+    assert tracker.update({"a": "static"}, now=1080)["a"] == 1
+    assert tracker.update({"a": "static"}, now=1260)["a"] == 0.5
+    assert tracker.update({"a": "static"}, now=1440)["a"] == 0
+
+
+def test_low_temperature_still_takes_full_six_minutes_to_cool() -> None:
+    tracker = ThermalTracker(max_sample_gap_seconds=600)
+    tracker.update({"a": "active"}, now=0)
+    assert tracker.update({"a": "active"}, now=60)["a"] == 0.1
+    assert tracker.update({"a": "static"}, now=62)["a"] == 0.1
+    assert tracker.update({"a": "static"}, now=242)["a"] == 0.05
+    assert tracker.update({"a": "static"}, now=422)["a"] == 0
 
 
 def test_colour_and_project_mean() -> None:
