@@ -7,11 +7,11 @@ import uuid
 import os
 import sys
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from . import __version__
 from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
-from .dialogs import ConfirmationDialog, RegistrationDialog, SignalLearningDialog, SignalManagementDialog
+from .dialogs import ConfirmationDialog, NoticeDialog, RegistrationDialog, SignalLearningDialog, SignalManagementDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
@@ -835,7 +835,7 @@ class TerminalManagerApp:
         try:
             focus_window(window_id, shake=tab_target is None, sync=tab_target is None)
         except X11Error as exc:
-            messagebox.showerror("无法进入终端", str(exc), parent=self.root)
+            self._notice("无法进入终端", str(exc), kind="error")
             return
         group = self.tab_groups.get(window_id)
         if tab_target:
@@ -956,7 +956,7 @@ class TerminalManagerApp:
     def learn_selected_signal(self) -> None:
         selected = self.selected()
         if not selected:
-            messagebox.showinfo("学习标题信号", "请先选择需要学习的终端窗口。", parent=self.root)
+            self._notice("学习标题信号", "请先在 Shell 工作区中选择需要学习的终端窗口。")
             return
         _iid, shell, window = selected
         window_id = window.window_id if window else shell.window_id if shell else ""
@@ -1000,11 +1000,11 @@ class TerminalManagerApp:
     def register_selected(self) -> None:
         selected = self.selected()
         if not selected:
-            messagebox.showinfo("登记窗口", "请先在列表中选择一个终端窗口。", parent=self.root)
+            self._notice("登记窗口", "请先在 Shell 工作区中选择一个终端窗口。")
             return
         iid, shell, window = selected
         if iid in self.tab_items:
-            messagebox.showinfo("隐藏标签", "隐藏标签暂时沿用所属窗口的管理记录。", parent=self.root)
+            self._notice("隐藏标签", "隐藏标签暂时沿用所属窗口的管理记录，请选择所属主窗口进行编辑。")
             return
         if shell:
             self.edit_record(shell, window)
@@ -1017,7 +1017,7 @@ class TerminalManagerApp:
         if not window and shell:
             window = find_window(shell.window_id, self.windows)
         if not window:
-            messagebox.showerror("窗口不存在", "当前记录对应的终端窗口已经关闭。", parent=self.root)
+            self._notice("窗口不存在", "当前记录对应的终端窗口已经关闭。", kind="error")
             return
         dialog = RegistrationDialog(
             self.root,
@@ -1061,12 +1061,15 @@ class TerminalManagerApp:
             return
         _iid, shell, _window = selected
         if not shell:
-            messagebox.showinfo("未注册窗口", "该条目没有注册记录可移除。", parent=self.root)
+            self._notice("未注册窗口", "该条目尚未登记，因此没有可移除的管理记录。")
             return
         dialog = ConfirmationDialog(self.root, title="移除记录", name=shell.name, palette=PALETTE)
         if dialog.result:
             remove_shell(shell.shell_id)
             self.refresh()
+
+    def _notice(self, title: str, message: str, *, kind: str = "info") -> None:
+        NoticeDialog(self.root, title=title, message=message, palette=PALETTE, kind=kind)
 
 def status_text(status: str) -> str:
     return f"{STATUS_DOTS.get(status, '●')}  {STATUS_LABELS.get(status, status)}"
@@ -1190,7 +1193,7 @@ def main() -> None:
         TerminalManagerApp(root)
     except X11Error as exc:
         root.withdraw()
-        messagebox.showerror("Terminal Manager 无法启动", str(exc))
+        NoticeDialog(root, title="Terminal Manager 无法启动", message=str(exc), palette=PALETTE, kind="error")
         raise SystemExit(1) from exc
     try:
         root.mainloop()

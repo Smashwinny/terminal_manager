@@ -105,6 +105,39 @@ class ConfirmationDialog:
         self.window.destroy()
 
 
+class NoticeDialog:
+    def __init__(self, parent: tk.Misc, *, title: str, message: str, palette: dict[str, str], kind: str = "info") -> None:
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.configure(background=palette["bg"])
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.grab_set()
+        body = tk.Frame(self.window, background=palette["bg"], padx=24, pady=22)
+        body.pack(fill=tk.BOTH, expand=True)
+        is_error = kind == "error"
+        icon_bg = "#3a2030" if is_error else palette["surface_2"]
+        icon_fg = "#fb8da0" if is_error else palette["accent"]
+        icon_text = "!" if is_error else "i"
+        tk.Label(body, text=icon_text, width=3, background=icon_bg, foreground=icon_fg, font=("Ubuntu", 14, "bold"), pady=4).pack(anchor=tk.W)
+        tk.Label(body, text=title, background=palette["bg"], foreground=palette["text"], font=("Noto Sans CJK SC", 15, "bold")).pack(anchor=tk.W, pady=(14, 6))
+        tk.Label(body, text=message, background=palette["bg"], foreground=palette["muted"], font=("Noto Sans CJK SC", 10), wraplength=500, justify=tk.LEFT).pack(anchor=tk.W)
+        buttons = tk.Frame(body, background=palette["bg"])
+        buttons.pack(fill=tk.X, pady=(22, 0))
+        ttk.Button(buttons, text="知道了", style="Accent.TButton", command=self.close).pack(side=tk.RIGHT)
+        self.window.bind("<Escape>", lambda _event: self.close())
+        self.window.bind("<Return>", lambda _event: self.close())
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.update_idletasks()
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.window.winfo_reqwidth()) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.window.winfo_reqheight()) // 2)
+        self.window.geometry(f"+{x}+{y}")
+        parent.wait_window(self.window)
+
+    def close(self) -> None:
+        self.window.destroy()
+
+
 class SignalLearningDialog:
     def __init__(self, parent: tk.Misc, *, window_title, palette: dict[str, str]) -> None:
         self.result: dict[str, set[str]] | None = None
