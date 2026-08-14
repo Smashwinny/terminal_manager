@@ -11,7 +11,7 @@ from tkinter import messagebox, ttk
 
 from . import __version__
 from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
-from .dialogs import RegistrationDialog, SignalLearningDialog, SignalManagementDialog
+from .dialogs import ConfirmationDialog, RegistrationDialog, SignalLearningDialog, SignalManagementDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
@@ -778,7 +778,18 @@ class TerminalManagerApp:
     ) -> None:
         visible_rows = len(self.tree.get_children())
         visible_rows = max(1, visible_rows)
-        if not force and visible_rows == self._last_layout_rows:
+        if not layout_resize_allowed(self._last_layout_rows, force=force):
+            # Background discovery must never override a size chosen by the
+            # user. A None marker is set only for initial layout and explicit
+            # triangle expansion/collapse.
+            self._last_layout_rows = visible_rows
+            self.tree.configure(height=visible_rows)
+            self.root.update_idletasks()
+            _first, last = self.tree.yview()
+            if last < 1.0 and not self.scrollbar.winfo_ismapped():
+                self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            elif last >= 1.0 and self.scrollbar.winfo_ismapped():
+                self.scrollbar.pack_forget()
             return
         self._last_layout_rows = visible_rows
         desired_height = max(640, 455 + visible_rows * 43)
@@ -1052,7 +1063,8 @@ class TerminalManagerApp:
         if not shell:
             messagebox.showinfo("未注册窗口", "该条目没有注册记录可移除。", parent=self.root)
             return
-        if messagebox.askyesno("移除记录", f"从总览移除“{shell.name}”？\n不会关闭 Shell 或终止任务。", parent=self.root):
+        dialog = ConfirmationDialog(self.root, title="移除记录", name=shell.name, palette=PALETTE)
+        if dialog.result:
             remove_shell(shell.shell_id)
             self.refresh()
 
@@ -1115,6 +1127,11 @@ def metric_matches(metric: str | None, status: str, unregistered: bool) -> bool:
     if metric == "unregistered":
         return unregistered
     return False
+
+
+def layout_resize_allowed(last_layout_rows: int | None, *, force: bool = False) -> bool:
+    """Resize only for initial layout or an explicit user layout action."""
+    return force or last_layout_rows is None
 
 
 def activity_explanation(activity: ActivityState) -> str:
