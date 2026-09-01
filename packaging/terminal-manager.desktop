@@ -9,3 +9,4 @@ Icon=terminal-manager
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupNotify=true
+StartupWMClass=Terminalmanager

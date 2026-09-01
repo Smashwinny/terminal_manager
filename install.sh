@@ -20,15 +20,21 @@ python3 -m pip install --user --upgrade --no-build-isolation .
 
 user_bin="${HOME}/.local/bin"
 desktop_dir="${HOME}/.local/share/applications"
-icon_dir="${HOME}/.local/share/icons/hicolor/64x64/apps"
+icon_dir_64="${HOME}/.local/share/icons/hicolor/64x64/apps"
+icon_dir_512="${HOME}/.local/share/icons/hicolor/512x512/apps"
 mkdir -p "$desktop_dir"
-mkdir -p "$icon_dir"
+mkdir -p "$icon_dir_64"
+mkdir -p "$icon_dir_512"
 launcher="$(mktemp)"
 trap 'rm -f "$launcher"' EXIT
 sed "s|@TERMINAL_MANAGER_EXEC@|${user_bin}/terminal-manager|g" \
     packaging/terminal-manager.desktop >"$launcher"
 install -m 0644 "$launcher" "$desktop_dir/terminal-manager.desktop"
-install -m 0644 terminal_manager/assets/terminal-manager.png "$icon_dir/terminal-manager.png"
+install -m 0644 terminal_manager/assets/terminal-manager-64.png "$icon_dir_64/terminal-manager.png"
+install -m 0644 terminal_manager/assets/terminal-manager.png "$icon_dir_512/terminal-manager.png"
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
+fi
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi

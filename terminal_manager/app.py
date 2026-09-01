@@ -1349,7 +1349,9 @@ def main() -> None:
     if not instance.acquire():
         activate_existing()
         return
-    root = tk.Tk()
+    # A stable WM_CLASS lets GNOME associate this Tk window with
+    # terminal-manager.desktop, so the running app can be pinned to the Dock.
+    root = tk.Tk(className="TerminalManager")
     try:
         TerminalManagerApp(root)
     except X11Error as exc:
