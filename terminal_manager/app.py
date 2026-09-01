@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 from tkinter import ttk
+from tkinter import font as tkfont
 
 from . import __version__
 from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
@@ -31,7 +32,16 @@ from .store import (
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty, terminal_tty_cwds
-from .x11 import X11Error, active_window_id, find_window, focus_window, list_windows, window_title
+from .x11 import (
+    X11Error,
+    active_window_id,
+    find_window,
+    focus_window,
+    list_windows,
+    set_window_above,
+    window_is_above,
+    window_title,
+)
 
 
 STATUS_COLORS = {
@@ -51,18 +61,35 @@ STATUS_COLORS = {
 STATUS_DOTS = {status: "●" for status in STATUS_COLORS}
 
 PALETTE = {
-    "bg": "#080d18",
-    "surface": "#101827",
-    "surface_2": "#151f31",
-    "surface_3": "#1b273b",
-    "border": "#26354d",
+    "bg": "#060914",
+    "surface": "#0d1526",
+    "surface_2": "#121d33",
+    "surface_3": "#182744",
+    "border": "#27436f",
     "text": "#f2f6ff",
     "muted": "#8fa1ba",
     "subtle": "#64748b",
-    "accent": "#7c6cff",
-    "accent_hover": "#9185ff",
-    "cyan": "#47c8ff",
+    "accent": "#765cff",
+    "accent_hover": "#947fff",
+    "cyan": "#20d5ff",
 }
+
+BASE_MIN_WIDTH = 860
+BASE_MIN_HEIGHT = 520
+MIN_UI_SCALE = 0.25
+
+
+def responsive_scale(width: int, height: int) -> float:
+    return max(MIN_UI_SCALE, min(1.0, width / BASE_MIN_WIDTH, height / BASE_MIN_HEIGHT))
+
+
+def scale_padding(root: tk.Misc, value: object, scale: float) -> int | tuple[int, ...]:
+    try:
+        parts = root.tk.splitlist(value)
+    except (tk.TclError, TypeError):
+        parts = (value,)
+    scaled = tuple(max(0, round(float(str(part)) * scale)) for part in parts)
+    return scaled[0] if len(scaled) == 1 else scaled
 
 
 class TerminalManagerApp:
@@ -77,7 +104,7 @@ class TerminalManagerApp:
             pass
         self.root.title(f"Terminal Manager {__version__}")
         self.root.geometry("1180x720")
-        self.root.minsize(860, 520)
+        self.root.minsize(BASE_MIN_WIDTH // 4, BASE_MIN_HEIGHT // 4)
         self.root.configure(background=PALETTE["bg"])
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
@@ -109,6 +136,10 @@ class TerminalManagerApp:
         self._focus_saved_tags: tuple[str, ...] | None = None
         self.refresh_job: str | None = None
         self.active_poll_job: str | None = None
+        self.resize_job: str | None = None
+        self.ui_scale = 1.0
+        self.pinned_window_id: str | None = None
+        self._pinned_was_above = False
         self.search_var = tk.StringVar()
         self.thermal_enabled = tk.BooleanVar(value=True)
         previous_session = load_runtime_session()
@@ -124,9 +155,11 @@ class TerminalManagerApp:
         save_runtime_session(clean_shutdown=False, entries=self._recovery_entries)
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
+        self._capture_scalable_layout()
         self._thermal_background_widgets = self._collect_thermal_background_widgets()
         self.window_highlighter = WindowHighlighter(root)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.bind("<Configure>", self._schedule_responsive_scale, add="+")
         self.refresh()
         self._poll_active_window()
         if self._recovery_active:
@@ -137,6 +170,7 @@ class TerminalManagerApp:
             self.root.after_cancel(self.active_poll_job)
             self.active_poll_job = None
         self.window_highlighter.hide()
+        self._release_managed_pin()
         save_runtime_session(clean_shutdown=True, entries=[])
         self.root.destroy()
 
@@ -149,14 +183,15 @@ class TerminalManagerApp:
         header.pack(fill=tk.X, pady=(0, 18))
         brand = ttk.Frame(header, style="App.TFrame")
         brand.pack(side=tk.LEFT)
+        brand_icon_path = Path(__file__).parent / "assets" / "terminal-manager-64.png"
+        self.brand_icon_source = tk.PhotoImage(file=brand_icon_path)
+        self.brand_icon_image = self.brand_icon_source
         self.logo = tk.Label(
             brand,
-            text=">_",
-            font=("Ubuntu Mono", 17, "bold"),
-            foreground="#ffffff",
-            background=PALETTE["accent"],
-            padx=10,
-            pady=7,
+            image=self.brand_icon_image,
+            background=PALETTE["bg"],
+            borderwidth=0,
+            highlightthickness=0,
         )
         self.logo.pack(side=tk.LEFT, padx=(0, 13))
         titles = ttk.Frame(brand, style="App.TFrame")
@@ -281,6 +316,7 @@ class TerminalManagerApp:
             "activity": "识别依据",
         }
         widths = {"name": 205, "window": 225, "cwd": 265, "status": 110, "last_change": 125, "activity": 145}
+        self._base_column_widths = dict(widths)
         for key in columns:
             self.tree.heading(key, text=labels[key])
             self.tree.column(key, width=widths[key], minwidth=70, stretch=key == "window")
@@ -335,6 +371,109 @@ class TerminalManagerApp:
             font=("Noto Sans CJK SC", 9),
         )
         self.details.pack(fill=tk.X, pady=(5, 0))
+
+    def _capture_scalable_layout(self) -> None:
+        self._scalable_fonts: list[tuple[tk.Widget, dict[str, object]]] = []
+        self._scalable_geometry: list[tuple[tk.Widget, str, object, object]] = []
+        self._scalable_internal: list[tuple[tk.Widget, str, object]] = []
+        self._scalable_dimensions: list[tuple[tk.Widget, int, int]] = []
+
+        def visit(widget: tk.Widget) -> None:
+            try:
+                value = widget.cget("font")
+                if value:
+                    self._scalable_fonts.append((widget, tkfont.Font(root=self.root, font=value).actual()))
+            except tk.TclError:
+                pass
+            for option in ("padding", "padx", "pady"):
+                try:
+                    value = widget.cget(option)
+                    if value not in ("", 0, "0"):
+                        self._scalable_internal.append((widget, option, value))
+                except tk.TclError:
+                    pass
+            if isinstance(widget, (tk.Canvas, tk.Frame)):
+                try:
+                    width, height = int(widget.cget("width")), int(widget.cget("height"))
+                    if width or height:
+                        self._scalable_dimensions.append((widget, width, height))
+                except (tk.TclError, ValueError):
+                    pass
+            manager = widget.winfo_manager()
+            if manager in {"pack", "grid"}:
+                info = widget.pack_info() if manager == "pack" else widget.grid_info()
+                self._scalable_geometry.append((widget, manager, info.get("padx", 0), info.get("pady", 0)))
+            for child in widget.winfo_children():
+                visit(child)
+
+        visit(self.root)
+
+    def _schedule_responsive_scale(self, event: tk.Event) -> None:
+        if event.widget is not self.root:
+            return
+        if self.resize_job is not None:
+            self.root.after_cancel(self.resize_job)
+        self.resize_job = self.root.after(60, self._apply_responsive_scale)
+
+    def _apply_responsive_scale(self) -> None:
+        self.resize_job = None
+        scale = responsive_scale(self.root.winfo_width(), self.root.winfo_height())
+        if abs(scale - self.ui_scale) < 0.015:
+            return
+        self.ui_scale = scale
+        for widget, specification in self._scalable_fonts:
+            try:
+                size = max(2, round(abs(int(specification["size"])) * scale))
+                styles = []
+                if specification["weight"] == "bold":
+                    styles.append("bold")
+                if specification["slant"] == "italic":
+                    styles.append("italic")
+                if specification["underline"]:
+                    styles.append("underline")
+                if specification["overstrike"]:
+                    styles.append("overstrike")
+                widget.configure(font=(specification["family"], size, *styles))
+            except (tk.TclError, ValueError, TypeError):
+                continue
+        for widget, manager, padx, pady in self._scalable_geometry:
+            try:
+                options = {"padx": scale_padding(self.root, padx, scale), "pady": scale_padding(self.root, pady, scale)}
+                if manager == "pack":
+                    widget.pack_configure(**options)
+                else:
+                    widget.grid_configure(**options)
+            except tk.TclError:
+                continue
+        for widget, option, value in self._scalable_internal:
+            try:
+                widget.configure(**{option: scale_padding(self.root, value, scale)})
+            except tk.TclError:
+                continue
+        for widget, width, height in self._scalable_dimensions:
+            try:
+                widget.configure(
+                    width=max(1, round(width * scale)) if width else 0,
+                    height=max(1, round(height * scale)) if height else 0,
+                )
+            except tk.TclError:
+                continue
+        self._configure_scaled_styles(scale)
+        for key, width in self._base_column_widths.items():
+            self.tree.column(key, width=max(18, round(width * scale)), minwidth=max(18, round(70 * scale)))
+        divisor = max(1, min(4, round(1 / scale)))
+        self.brand_icon_image = self.brand_icon_source.subsample(divisor, divisor)
+        self.logo.configure(image=self.brand_icon_image)
+
+    def _configure_scaled_styles(self, scale: float) -> None:
+        size = lambda value: max(2, round(value * scale))
+        self.style.configure("Title.TLabel", font=("Ubuntu", size(18), "bold"))
+        self.style.configure("Subtitle.TLabel", font=("Noto Sans CJK SC", size(9)))
+        self.style.configure("Accent.TButton", padding=(size(15), size(8)), font=("Noto Sans CJK SC", size(9), "bold"))
+        self.style.configure("Ghost.TButton", padding=(size(14), size(8)), font=("Noto Sans CJK SC", size(9)))
+        self.style.configure("Danger.TButton", padding=(size(14), size(8)), font=("Noto Sans CJK SC", size(9)))
+        self.style.configure("Shell.Treeview", rowheight=max(11, round(43 * scale)), font=("Noto Sans CJK SC", size(9)))
+        self.style.configure("Shell.Treeview.Heading", padding=(size(10), size(10)), font=("Noto Sans CJK SC", size(9), "bold"))
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -750,9 +889,9 @@ class TerminalManagerApp:
             self._suppress_group_release = True
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
-            self.root.after_idle(self.focus_selected)
+            self.root.after_idle(lambda: self.focus_selected(pin=True))
             return "break"
-        self.focus_selected()
+        self.focus_selected(pin=True)
         return None
 
     def _schedule_group_click(self, callback) -> None:
@@ -919,7 +1058,7 @@ class TerminalManagerApp:
     ) -> None:
         visible_rows = len(self.tree.get_children())
         visible_rows = max(1, visible_rows)
-        if not layout_resize_allowed(self._last_layout_rows, force=force):
+        if self.ui_scale < 0.99 or not layout_resize_allowed(self._last_layout_rows, force=force):
             # Background discovery must never override a size chosen by the
             # user. A None marker is set only for initial layout and explicit
             # triangle expansion/collapse.
@@ -948,14 +1087,14 @@ class TerminalManagerApp:
                 self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         elif self.scrollbar.winfo_ismapped():
             self.scrollbar.pack_forget()
-        width = max(1180, self.root.winfo_width())
+        width = max(BASE_MIN_WIDTH // 4, self.root.winfo_width())
         # A size-only geometry request leaves placement entirely untouched.
         # Reapplying winfo_x/y here is incorrect on decorated X11 windows:
         # Tk reports client coordinates while the window manager positions the
         # outer frame, producing a title-bar-sized downward jump.
         self.root.geometry(f"{width}x{target_height}")
 
-    def focus_selected(self) -> None:
+    def focus_selected(self, *, pin: bool = False) -> None:
         selected = self.selected()
         if not selected:
             return
@@ -978,6 +1117,8 @@ class TerminalManagerApp:
         except X11Error as exc:
             self._notice("无法进入终端", str(exc), kind="error")
             return
+        if pin:
+            self._pin_window(window_id)
         group = self.tab_groups.get(window_id)
         if tab_target:
             tab_key = f"tab:{tab_target[1]}"
@@ -1000,6 +1141,29 @@ class TerminalManagerApp:
         else:
             self.window_highlighter.hide()
             self.details.configure(text="未能自动识别该标签的 TTY；聚焦和震动仍然可用。")
+
+    def _pin_window(self, window_id: str) -> None:
+        if self.pinned_window_id == window_id:
+            return
+        self._release_managed_pin()
+        was_above = window_is_above(window_id)
+        try:
+            pinned = was_above or set_window_above(window_id, True)
+        except X11Error as exc:
+            self.details.configure(text=f"窗口已聚焦，但置顶失败：{exc}")
+            return
+        if pinned:
+            self.pinned_window_id = window_id
+            self._pinned_was_above = was_above
+
+    def _release_managed_pin(self) -> None:
+        if self.pinned_window_id and not self._pinned_was_above:
+            try:
+                set_window_above(self.pinned_window_id, False)
+            except X11Error:
+                pass
+        self.pinned_window_id = None
+        self._pinned_was_above = False
 
     def _remember_tty(self, window_id: str, tab_key: str, tty: str) -> None:
         self.tty_bindings.setdefault(window_id, {})[tab_key] = tty
@@ -1082,6 +1246,8 @@ class TerminalManagerApp:
             text += "\n当前窗口 ID 已不存在；Shell 可能结束或窗口已经关闭。"
         elif iid in self.tab_items:
             text += "\n这是同一终端窗口中的隐藏标签；单击即可切换到该标签。"
+        if window_id and window_id == self.pinned_window_id:
+            text += "\n📌 该终端由双击操作置顶；双击其他终端会转移置顶。"
         self.details.configure(text=text)
 
     def rename_selected(self) -> None:

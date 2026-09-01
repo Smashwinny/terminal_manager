@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from terminal_manager.x11 import X11Error, list_windows, parse_wmctrl_line
+from terminal_manager.x11 import X11Error, list_windows, parse_wmctrl_line, set_window_above, window_is_above
 
 
 def test_parse_wmctrl_line_with_title_spaces() -> None:
@@ -30,3 +30,19 @@ def test_list_windows_converts_timeout_to_recoverable_x11_error() -> None:
         pytest.raises(X11Error, match="超时"),
     ):
         list_windows()
+
+
+def test_window_above_uses_exact_ewmh_operations() -> None:
+    with patch("terminal_manager.x11.require_x11"), patch("terminal_manager.x11.subprocess.run") as run:
+        run.return_value.returncode = 0
+        assert set_window_above("0x1", True)
+        assert run.call_args.args[0] == ["wmctrl", "-i", "-r", "0x00000001", "-b", "add,above"]
+        assert set_window_above("0x1", False)
+        assert run.call_args.args[0] == ["wmctrl", "-i", "-r", "0x00000001", "-b", "remove,above"]
+
+
+def test_existing_above_state_is_detected() -> None:
+    with patch("terminal_manager.x11.subprocess.run") as run:
+        run.return_value.returncode = 0
+        run.return_value.stdout = "_NET_WM_STATE(ATOM) = _NET_WM_STATE_ABOVE"
+        assert window_is_above("0x1")

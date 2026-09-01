@@ -99,6 +99,40 @@ def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> No
         shake_window(wid)
 
 
+def window_is_above(window_id: str) -> bool:
+    """Return whether EWMH already marks a window as always-on-top."""
+    wid = normalize_window_id(window_id)
+    try:
+        result = subprocess.run(
+            ["xprop", "-id", wid, "_NET_WM_STATE"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "_NET_WM_STATE_ABOVE" in result.stdout
+
+
+def set_window_above(window_id: str, enabled: bool) -> bool:
+    """Add or remove the EWMH always-on-top state for one exact window."""
+    require_x11()
+    wid = normalize_window_id(window_id)
+    operation = "add,above" if enabled else "remove,above"
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-i", "-r", wid, "-b", operation],
+            timeout=3,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def shake_window(window_id: str) -> None:
     """Give a focused window a short horizontal shake and restore its position.
 
