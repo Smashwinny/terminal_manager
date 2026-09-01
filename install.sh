@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for command_name in python3 wmctrl xdotool; do
+for command_name in python3 wmctrl xdotool xinput; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         printf '缺少依赖：%s\n' "$command_name" >&2
-        printf 'Ubuntu/Debian 可执行：sudo apt install python3-tk wmctrl xdotool\n' >&2
+        printf 'Ubuntu/Debian 可执行：sudo apt install python3-tk wmctrl xdotool xinput\n' >&2
         exit 1
     fi
 done

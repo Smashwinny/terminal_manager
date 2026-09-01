@@ -27,7 +27,7 @@ Terminal Manager 不接管 PTY、不迁移 Shell，也不会终止现有任务�
 - 工作区在窗口与状态之间显示每个 Shell/标签当前的工作目录（PWD）；
 - 顶部统计卡可点击，对应状态或待注册 Shell 会在工作区中整体紫色高亮；
 - 单击 Shell 名称即可聚焦并震动目标窗口，同时在管理器中保留醒目的紫色定位；
-- 单击切换到另一条工作区记录时播放紫色定位；双击时无论是否为同一条记录都会强制重播；
+- 单击或双击终端窗口时，对应管理器列表行变紫；单击或双击管理器列表行时，对应终端震动并显示紫色背景高亮；
 - 首次点击标签时通过一次性小图像探测自动学习其 TTY，之后按“窗口 + 标签”缓存；通过 OSC 11 临时改变终端原生背景色，文字、光标、输入和窗口尺寸保持不变；
 - 默认启用温度渲染：输出时逐步升温、等待用户时保温、静态时冷却；10 分钟连续输出达到红色上限，静态最多 6 分钟恢复基础色，界面强调色显示所有项目的平均温度；
 - 窗口随可见条目自动加长，屏幕空间足够时隐藏滚动条并完整展示列表；超过屏幕高度时使用窄型滚动条；
@@ -72,6 +72,7 @@ echo "$DISPLAY"
 - Python 3.9+、Tk 和 pip；
 - `wmctrl`：枚举并激活现有窗口；
 - `xdotool`：读取活动窗口、聚焦和定位反馈；
+- `xinput`：只读监听终端窗口的左键双击，用于反向高亮管理器记录；
 - `python3-pyatspi`：读取 GNOME Terminal 标签列表并切换隐藏标签；
 - `xwd`（Ubuntu 包 `x11-apps`）和 `ffmpeg`：首次学习标签 TTY 时执行一次性小图像探测；
 - GNOME Terminal 原生背景高亮使用 OSC 11，不修改终端配置文件。
@@ -81,7 +82,7 @@ Ubuntu/Debian 一次安装全部依赖：
 ```bash
 sudo apt update
 sudo apt install git python3 python3-pip python3-tk python3-pyatspi \
-  wmctrl xdotool x11-apps ffmpeg
+  wmctrl xdotool xinput x11-apps ffmpeg
 ```
 
 缺少 `python3-pyatspi` 时，普通终端窗口仍能显示，但 GNOME Terminal 多标签识别不可用。缺少 `xwd` 或 `ffmpeg` 时，聚焦和震动仍可用，但未知标签无法自动学习 TTY 并改变终端背景色。

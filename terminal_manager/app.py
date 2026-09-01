@@ -15,6 +15,7 @@ from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityS
 from .dialogs import ConfirmationDialog, NoticeDialog, RegistrationDialog, SignalLearningDialog, SignalManagementDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
+from .pointer import PointerPressMonitor
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
 from .recovery import launch_recovery_terminal, validate_recovery_directory
 from .store import (
@@ -138,6 +139,7 @@ class TerminalManagerApp:
         self.metric_highlight: str | None = None
         self.focused_item_id: str | None = None
         self._observed_active_item: str | None = None
+        self._last_pointer_press: tuple[str, float] | None = None
         self._focus_clear_job: str | None = None
         self._focus_saved_tags: tuple[str, ...] | None = None
         self.refresh_job: str | None = None
@@ -165,6 +167,8 @@ class TerminalManagerApp:
         self._capture_scalable_layout()
         self._thermal_background_widgets = self._collect_thermal_background_widgets()
         self.window_highlighter = WindowHighlighter(root)
+        self.pointer_monitor = PointerPressMonitor()
+        self.pointer_monitor.start()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.bind("<Configure>", self._schedule_responsive_scale, add="+")
         self.refresh()
@@ -191,6 +195,7 @@ class TerminalManagerApp:
         self._cancel_group_click()
         self._save_current_window_size()
         self.window_highlighter.hide()
+        self.pointer_monitor.close()
         self._release_managed_pin()
         save_runtime_session(clean_shutdown=True, entries=[])
         self.root.destroy()
@@ -847,6 +852,20 @@ class TerminalManagerApp:
                 self.tree.focus(active_item)
                 self.tree.see(active_item)
                 self._flash_workspace_item(active_item)
+        for pressed_at in self.pointer_monitor.drain():
+            previous = self._last_pointer_press
+            if active_item and previous and previous[0] == active_item and pressed_at - previous[1] <= 0.5:
+                # Clicking an already-active terminal does not change
+                # _NET_ACTIVE_WINDOW. XI2 supplies the missing double-click
+                # signal so the matching manager row can replay its locator.
+                if self.tree.exists(active_item):
+                    self.tree.selection_set(active_item)
+                    self.tree.focus(active_item)
+                    self.tree.see(active_item)
+                    self._flash_workspace_item(active_item)
+                self._last_pointer_press = None
+            else:
+                self._last_pointer_press = (active_item, pressed_at) if active_item else None
         self.active_poll_job = self.root.after(200, self._poll_active_window)
 
     def _directory_for(
