@@ -860,6 +860,13 @@ class TerminalManagerApp:
         if self._suppress_group_release:
             self._suppress_group_release = False
             return
+        if item_id and self.tree.exists(item_id) and self.tree.identify_region(event.x, event.y) == "cell":
+            # <<TreeviewSelect>> only fires when the selected item changes.
+            # A direct click must replay the visual locator even when the user
+            # repeatedly clicks the same already-selected row.
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+            self._flash_workspace_item(item_id)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
             bounds = self.tree.bbox(item_id, "name")
             if bounds and event.x - bounds[0] <= 38:
