@@ -15,6 +15,7 @@ from .dialogs import ConfirmationDialog, NoticeDialog, RegistrationDialog, Signa
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
+from .recovery import launch_recovery_terminal, validate_recovery_directory
 from .store import (
     load_learned_protocol,
     load_shells,
@@ -24,6 +25,8 @@ from .store import (
     assign_learned_signal,
     save_shell,
     save_tty_binding,
+    load_runtime_session,
+    save_runtime_session,
 )
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
@@ -108,6 +111,17 @@ class TerminalManagerApp:
         self.active_poll_job: str | None = None
         self.search_var = tk.StringVar()
         self.thermal_enabled = tk.BooleanVar(value=True)
+        previous_session = load_runtime_session()
+        self._recovery_entries = list(previous_session["entries"]) if not previous_session["clean_shutdown"] else []
+        self._recovery_index = 0
+        self._recovery_before_ids: set[str] = set()
+        self._recovery_poll_count = 0
+        self._recovery_errors: list[str] = []
+        self._recovery_restored_count = 0
+        self._recovery_skipped_count = 0
+        self._recovery_active = bool(self._recovery_entries)
+        # Preserve the previous crash snapshot until recovery has completed.
+        save_runtime_session(clean_shutdown=False, entries=self._recovery_entries)
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
         self._thermal_background_widgets = self._collect_thermal_background_widgets()
@@ -115,12 +129,15 @@ class TerminalManagerApp:
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.refresh()
         self._poll_active_window()
+        if self._recovery_active:
+            self.root.after(350, self._restore_next_window)
 
     def _close(self) -> None:
         if self.active_poll_job is not None:
             self.root.after_cancel(self.active_poll_job)
             self.active_poll_job = None
         self.window_highlighter.hide()
+        save_runtime_session(clean_shutdown=True, entries=[])
         self.root.destroy()
 
     def _build_ui(self) -> None:
@@ -215,9 +232,15 @@ class TerminalManagerApp:
             highlightthickness=1,
         )
         surface.pack(fill=tk.BOTH, expand=True)
+        # Keep the action footer in a dedicated, non-expanding row. The tree's
+        # requested height grows with discovered terminals; when all three
+        # regions used vertical pack geometry, that request could push the
+        # footer (including "移除记录") below the visible surface.
+        surface.grid_columnconfigure(0, weight=1)
+        surface.grid_rowconfigure(1, weight=1)
 
         toolbar = tk.Frame(surface, background=PALETTE["surface"], padx=16, pady=13)
-        toolbar.pack(fill=tk.X)
+        toolbar.grid(row=0, column=0, sticky="ew")
         tk.Label(toolbar, text="Shell 工作区", foreground=PALETTE["text"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 11, "bold")).pack(side=tk.LEFT)
         tk.Label(toolbar, text="点击 ▸ 展开标签 · 双击条目进入窗口", foreground=PALETTE["muted"], background=PALETTE["surface"], font=("Noto Sans CJK SC", 9)).pack(side=tk.LEFT, padx=12)
         search_box = tk.Frame(toolbar, background=PALETTE["surface_2"], padx=10, pady=5)
@@ -240,7 +263,7 @@ class TerminalManagerApp:
 
         columns = ("name", "window", "cwd", "status", "last_change", "activity")
         table = ttk.Frame(surface, style="Surface.TFrame")
-        table.pack(fill=tk.BOTH, expand=True, padx=1)
+        table.grid(row=1, column=0, sticky="nsew", padx=1)
         self.tree = ttk.Treeview(
             table,
             columns=columns,
@@ -279,7 +302,7 @@ class TerminalManagerApp:
         self.tree.bind("<Return>", lambda _event: self.focus_selected())
 
         footer = tk.Frame(surface, background=PALETTE["surface"], padx=16, pady=13)
-        footer.pack(fill=tk.X)
+        footer.grid(row=2, column=0, sticky="ew")
         actions = ttk.Frame(footer, style="Surface.TFrame")
         actions.pack(side=tk.LEFT)
         ttk.Button(actions, text="进入并高亮", style="Accent.TButton", command=self.focus_selected).pack(side=tk.LEFT)
@@ -364,6 +387,7 @@ class TerminalManagerApp:
         selection = self.tree.selection()
         if selection:
             selected_shell_id = selection[0]
+        scan_ok = False
         try:
             scanned_windows = list_windows()
             scanned_activities = self.activity_tracker.update(scanned_windows)
@@ -372,6 +396,7 @@ class TerminalManagerApp:
             self._harvest_tab_scan()
             self._request_tab_scan()
             error = ""
+            scan_ok = True
         except X11Error as exc:
             # A transient wmctrl/xdotool failure must not turn every registered
             # task into an ended (red) row. Keep the last known-good snapshot
@@ -380,6 +405,7 @@ class TerminalManagerApp:
 
         shells = load_shells()
         tty_cwds = terminal_tty_cwds()
+        live_session_entries: list[dict[str, str]] = []
 
         self.tree.delete(*self.tree.get_children())
         self.items.clear()
@@ -400,6 +426,28 @@ class TerminalManagerApp:
         for info in shells:
             if info.shell_id not in used_record_ids:
                 rows.append((info, None, None, "ended", info.name))
+
+        # Persist every live registered window independently of search/filter
+        # state. UI filtering must never remove an entry from the crash
+        # recovery snapshot.
+        for info, window, _activity, _status, _name in rows:
+            if not info or not window:
+                continue
+            group = self.tab_groups.get(window.window_id)
+            tab_key = f"tab:{group.selected.index}" if group else "main"
+            cwd = self._directory_for(info, window, tab_key, tty_cwds)
+            if not cwd:
+                continue
+            if info.cwd != cwd:
+                info.cwd = cwd
+                info.last_seen = time.time()
+                save_shell(info)
+            live_session_entries.append({
+                "shell_id": info.shell_id,
+                "name": info.name,
+                "cwd": cwd,
+                "window_id": window.window_id,
+            })
 
         rows.sort(key=lambda row: activity_sort_key(row[2], row[3], row[4]))
         tab_signals = []
@@ -515,6 +563,99 @@ class TerminalManagerApp:
             self._sync_selected_style()
         self.update_details()
         self._adapt_window_height()
+        if scan_ok and not self._recovery_active:
+            save_runtime_session(clean_shutdown=False, entries=live_session_entries)
+
+    def _restore_next_window(self) -> None:
+        if self._recovery_index >= len(self._recovery_entries):
+            self._finish_recovery()
+            return
+        entry = self._recovery_entries[self._recovery_index]
+        live_ids = {window.window_id for window in self.windows}
+        if entry["window_id"] in live_ids:
+            self._recovery_skipped_count += 1
+            self._recovery_index += 1
+            self.root.after(0, self._restore_next_window)
+            return
+        directory, reason = validate_recovery_directory(entry["cwd"])
+        if directory is None:
+            self._record_recovery_error(entry, reason)
+            self._recovery_index += 1
+            self.root.after(0, self._restore_next_window)
+            return
+        self._recovery_before_ids = live_ids
+        started, reason = launch_recovery_terminal(directory)
+        if not started:
+            self._record_recovery_error(entry, reason)
+            self._recovery_index += 1
+            self.root.after(0, self._restore_next_window)
+            return
+        self._recovery_poll_count = 0
+        self.root.after(250, self._poll_recovered_window)
+
+    def _poll_recovered_window(self) -> None:
+        entry = self._recovery_entries[self._recovery_index]
+        try:
+            windows = list_windows()
+        except X11Error:
+            windows = []
+        candidates = [window for window in windows if window.window_id not in self._recovery_before_ids]
+        if candidates:
+            window = candidates[-1]
+            shell = next((item for item in load_shells() if item.shell_id == entry["shell_id"]), None)
+            now = time.time()
+            if shell is None:
+                shell = ShellInfo(
+                    shell_id=entry["shell_id"],
+                    window_id=window.window_id,
+                    shell_pid=0,
+                    tty="",
+                    name=entry["name"],
+                    status="unbound",
+                    status_detail="异常退出后已从恢复快照重建登记",
+                    command="",
+                    cwd=entry["cwd"],
+                    foreground_pid=None,
+                    process_state="",
+                    registered_at=now,
+                    last_seen=now,
+                )
+            else:
+                shell.window_id = window.window_id
+                shell.cwd = entry["cwd"]
+                shell.status = "unbound"
+                shell.status_detail = "异常退出后已按保存目录恢复"
+                shell.last_seen = now
+            save_shell(shell)
+            self._recovery_restored_count += 1
+            self._recovery_index += 1
+            self.refresh()
+            self.root.after(0, self._restore_next_window)
+            return
+        self._recovery_poll_count += 1
+        if self._recovery_poll_count < 24:
+            self.root.after(250, self._poll_recovered_window)
+            return
+        self._record_recovery_error(entry, "终端已启动，但未能在 6 秒内识别新窗口")
+        self._recovery_index += 1
+        self.root.after(0, self._restore_next_window)
+
+    def _record_recovery_error(self, entry: dict[str, str], reason: str) -> None:
+        message = f"恢复“{entry['name']}”失败：{reason}"
+        self._recovery_errors.append(message)
+        print(message, file=sys.stderr, flush=True)
+
+    def _finish_recovery(self) -> None:
+        self._recovery_active = False
+        self.refresh()
+        if self._recovery_errors:
+            summary = f"已恢复 {self._recovery_restored_count} 个，跳过已存在 {self._recovery_skipped_count} 个。"
+            self.details.configure(text=summary + "\n" + "；".join(self._recovery_errors))
+        elif self._recovery_entries:
+            self.details.configure(
+                text=f"已恢复 {self._recovery_restored_count} 个异常结束前登记窗口，"
+                f"跳过已存在 {self._recovery_skipped_count} 个。"
+            )
 
     def _poll_active_window(self) -> None:
         """Track focus cheaply so reverse highlighting is independent of full refreshes."""
@@ -1029,6 +1170,26 @@ class TerminalManagerApp:
             return
         name = dialog.result
         now = time.time()
+        group = self.tab_groups.get(window.window_id)
+        tab_key = f"tab:{group.selected.index}" if group else "main"
+        tty_cwds = terminal_tty_cwds()
+        captured_cwd = self._directory_for(shell, window, tab_key, tty_cwds)
+        if not captured_cwd:
+            try:
+                focus_window(window.window_id, shake=False)
+                tty = probe_visible_tty(window.window_id) or ""
+            except X11Error:
+                tty = ""
+            if tty:
+                self._remember_tty(window.window_id, tab_key, tty)
+                captured_cwd = terminal_tty_cwds().get(tty, "")
+        if shell is None and not captured_cwd:
+            self._notice(
+                "无法登记窗口",
+                "未能确认该终端当前的工作目录，因此没有创建无法恢复的登记记录。请确认 xwd、ffmpeg 可用后重试。",
+                kind="error",
+            )
+            return
         if shell is None:
             shell = ShellInfo(
                 shell_id=uuid.uuid4().hex[:12],
@@ -1039,7 +1200,7 @@ class TerminalManagerApp:
                 status="unbound",
                 status_detail="仅记录名称",
                 command="",
-                cwd="",
+                cwd=captured_cwd,
                 foreground_pid=None,
                 process_state="",
                 registered_at=now,
@@ -1050,7 +1211,7 @@ class TerminalManagerApp:
         shell.status = "unbound"
         shell.status_detail = "Codex 状态由终端窗口标题识别"
         shell.command = ""
-        shell.cwd = ""
+        shell.cwd = captured_cwd or shell.cwd
         shell.last_seen = now
         save_shell(shell)
         self.refresh()
