@@ -905,9 +905,9 @@ class TerminalManagerApp:
             self._schedule_group_click(lambda: self.focus_selected(replay_highlight=False))
             return
         if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) == "cell":
-            self.root.after_idle(lambda: self.focus_selected(replay_highlight=False))
+            self._schedule_group_click(lambda: self.focus_selected(replay_highlight=False))
         elif item_id and self.tree.identify_column(event.x) == "#1" and self.tree.identify_region(event.x, event.y) == "cell":
-            self.root.after_idle(lambda: self.focus_selected(replay_highlight=False))
+            self._schedule_group_click(lambda: self.focus_selected(replay_highlight=False))
 
     def _handle_tree_press(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
@@ -925,12 +925,16 @@ class TerminalManagerApp:
 
     def _handle_tree_double_click(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
+        # A normal release used to focus the terminal immediately, causing the
+        # manager to lose focus before the physical second click could arrive.
+        # Cancel that pending single-click action and consume the second
+        # release so a real double-click remains entirely in this widget.
+        self._cancel_group_click()
+        self._suppress_group_release = True
         # Tk may route the second rapid press directly to <Double-1> instead
         # of the ordinary press binding, so replay explicitly here as well.
         self._replay_clicked_row(item_id, event)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
-            self._cancel_group_click()
-            self._suppress_group_release = True
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
             self.root.after_idle(lambda: self.focus_selected(pin=True, replay_highlight=False))
