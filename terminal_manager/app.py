@@ -902,16 +902,19 @@ class TerminalManagerApp:
             if bounds and event.x - bounds[0] <= 38:
                 self._schedule_group_click(lambda: self._toggle_group(item_id))
                 return
-            self._schedule_group_click(self.focus_selected)
+            self._schedule_group_click(lambda: self.focus_selected(replay_highlight=False))
             return
         if item_id in self.tab_items and self.tree.identify_region(event.x, event.y) == "cell":
-            self.root.after_idle(self.focus_selected)
+            self.root.after_idle(lambda: self.focus_selected(replay_highlight=False))
         elif item_id and self.tree.identify_column(event.x) == "#1" and self.tree.identify_region(event.x, event.y) == "cell":
-            self.root.after_idle(self.focus_selected)
+            self.root.after_idle(lambda: self.focus_selected(replay_highlight=False))
 
     def _handle_tree_press(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
-        self._replay_clicked_row(item_id, event)
+        selected = self.tree.selection()
+        if item_id and (not selected or selected[0] != item_id):
+            # A single click highlights only when it switches to another row.
+            self._replay_clicked_row(item_id, event)
         if item_id.startswith("group:"):
             # Own every group-row mouse event so ttk's class-level double-click
             # binding can never toggle the item's open state behind our back.
@@ -930,9 +933,9 @@ class TerminalManagerApp:
             self._suppress_group_release = True
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
-            self.root.after_idle(lambda: self.focus_selected(pin=True))
+            self.root.after_idle(lambda: self.focus_selected(pin=True, replay_highlight=False))
             return "break"
-        self.focus_selected(pin=True)
+        self.focus_selected(pin=True, replay_highlight=False)
         return None
 
     def _replay_clicked_row(self, item_id: str, event: tk.Event) -> None:
@@ -1144,7 +1147,7 @@ class TerminalManagerApp:
         # outer frame, producing a title-bar-sized downward jump.
         self.root.geometry(f"{width}x{target_height}")
 
-    def focus_selected(self, *, pin: bool = False) -> None:
+    def focus_selected(self, *, pin: bool = False, replay_highlight: bool = True) -> None:
         selected = self.selected()
         if not selected:
             return
@@ -1160,7 +1163,8 @@ class TerminalManagerApp:
         window_id = window.window_id if window else shell.window_id if shell else ""
         if not window_id:
             return
-        self._flash_workspace_item(iid)
+        if replay_highlight:
+            self._flash_workspace_item(iid)
         self.root.update_idletasks()
         try:
             focus_window(window_id, shake=tab_target is None, sync=tab_target is None)
