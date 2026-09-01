@@ -10,6 +10,9 @@ from terminal_manager.store import (
     runtime_session_path,
     save_runtime_session,
     save_shell,
+    load_window_size,
+    save_window_size,
+    ui_state_path,
 )
 
 
@@ -45,6 +48,13 @@ def test_clean_session_is_not_recoverable(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     save_runtime_session(clean_shutdown=True, entries=[])
     assert load_runtime_session() == {"clean_shutdown": True, "entries": []}
+
+
+def test_window_size_survives_restart_and_is_private(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    save_window_size(982, 646)
+    assert load_window_size() == (982, 646)
+    assert ui_state_path().stat().st_mode & 0o777 == 0o600
 
 
 def test_recovery_directory_must_be_absolute_existing_and_accessible(tmp_path) -> None:

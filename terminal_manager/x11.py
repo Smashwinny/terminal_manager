@@ -87,14 +87,17 @@ def window_title(window_id: str) -> str | None:
 def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> None:
     require_x11()
     wid = normalize_window_id(window_id)
-    # wmctrl switches desktop when necessary; xdotool then raises and focuses it.
-    subprocess.run(["wmctrl", "-i", "-a", wid], timeout=3, check=False)
-    subprocess.run(["xdotool", "windowraise", wid], timeout=2, check=False)
-    activate = ["xdotool", "windowactivate"]
-    if sync:
-        activate.append("--sync")
-    activate.append(wid)
-    subprocess.run(activate, timeout=3, check=False)
+    try:
+        # wmctrl switches desktop when necessary; xdotool then raises and focuses it.
+        subprocess.run(["wmctrl", "-i", "-a", wid], timeout=3, check=False)
+        subprocess.run(["xdotool", "windowraise", wid], timeout=2, check=False)
+        activate = ["xdotool", "windowactivate"]
+        if sync:
+            activate.append("--sync")
+        activate.append(wid)
+        subprocess.run(activate, timeout=3, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise X11Error("目标窗口响应超时，可能已经关闭") from exc
     if shake:
         shake_window(wid)
 

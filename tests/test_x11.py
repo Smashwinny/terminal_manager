@@ -46,3 +46,14 @@ def test_existing_above_state_is_detected() -> None:
         run.return_value.returncode = 0
         run.return_value.stdout = "_NET_WM_STATE(ATOM) = _NET_WM_STATE_ABOVE"
         assert window_is_above("0x1")
+
+
+def test_focus_timeout_is_a_recoverable_x11_error() -> None:
+    with (
+        patch("terminal_manager.x11.require_x11"),
+        patch("terminal_manager.x11.subprocess.run", side_effect=subprocess.TimeoutExpired(["wmctrl"], 3)),
+        pytest.raises(X11Error, match="响应超时"),
+    ):
+        from terminal_manager.x11 import focus_window
+
+        focus_window("0x1")

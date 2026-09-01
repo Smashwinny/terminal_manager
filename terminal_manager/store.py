@@ -12,6 +12,7 @@ from .model import ShellInfo
 TTY_BINDINGS_VERSION = 2
 LEARNED_SIGNALS_VERSION = 2
 RUNTIME_SESSION_VERSION = 1
+UI_STATE_VERSION = 1
 
 
 def state_dir() -> Path:
@@ -29,6 +30,10 @@ def learned_signals_path() -> Path:
 
 def runtime_session_path() -> Path:
     return state_dir().parent / "runtime-session.json"
+
+
+def ui_state_path() -> Path:
+    return state_dir().parent / "ui-state.json"
 
 
 def _atomic_private_json(target: Path, payload: object) -> None:
@@ -91,6 +96,28 @@ def save_runtime_session(*, clean_shutdown: bool, entries: list[dict[str, str]])
         "entries": entries,
     }
     _atomic_private_json(runtime_session_path(), payload)
+
+
+def load_window_size() -> tuple[int, int] | None:
+    try:
+        data = json.loads(ui_state_path().read_text(encoding="utf-8"))
+        if data.get("version") != UI_STATE_VERSION:
+            return None
+        width, height = int(data["width"]), int(data["height"])
+        if width < 1 or height < 1:
+            return None
+        return width, height
+    except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def save_window_size(width: int, height: int) -> None:
+    if width < 1 or height < 1:
+        return
+    _atomic_private_json(
+        ui_state_path(),
+        {"version": UI_STATE_VERSION, "width": int(width), "height": int(height)},
+    )
 
 
 def load_learned_protocol() -> dict[str, set[str]]:

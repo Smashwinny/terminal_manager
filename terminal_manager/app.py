@@ -28,6 +28,8 @@ from .store import (
     save_tty_binding,
     load_runtime_session,
     save_runtime_session,
+    load_window_size,
+    save_window_size,
 )
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
@@ -103,7 +105,11 @@ class TerminalManagerApp:
         except tk.TclError:
             pass
         self.root.title(f"Terminal Manager {__version__}")
-        self.root.geometry("1180x720")
+        saved_window_size = load_window_size()
+        initial_width, initial_height = saved_window_size or (1180, 720)
+        initial_width = min(max(BASE_MIN_WIDTH // 4, initial_width), self.root.winfo_screenwidth())
+        initial_height = min(max(BASE_MIN_HEIGHT // 4, initial_height), self.root.winfo_screenheight())
+        self.root.geometry(f"{initial_width}x{initial_height}")
         self.root.minsize(BASE_MIN_WIDTH // 4, BASE_MIN_HEIGHT // 4)
         self.root.configure(background=PALETTE["bg"])
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
@@ -126,7 +132,7 @@ class TerminalManagerApp:
         self._tab_scan_thread: threading.Thread | None = None
         self._tab_group_misses: dict[str, int] = {}
         self.expanded_window_ids: set[str] = set()
-        self._last_layout_rows: int | None = None
+        self._last_layout_rows: int | None = 0 if saved_window_size else None
         self._group_click_job: str | None = None
         self._suppress_group_release = False
         self.metric_highlight: str | None = None
@@ -137,6 +143,7 @@ class TerminalManagerApp:
         self.refresh_job: str | None = None
         self.active_poll_job: str | None = None
         self.resize_job: str | None = None
+        self.window_size_job: str | None = None
         self.ui_scale = 1.0
         self.pinned_window_id: str | None = None
         self._pinned_was_above = False
@@ -166,9 +173,23 @@ class TerminalManagerApp:
             self.root.after(350, self._restore_next_window)
 
     def _close(self) -> None:
+        if self.refresh_job is not None:
+            self.root.after_cancel(self.refresh_job)
+            self.refresh_job = None
         if self.active_poll_job is not None:
             self.root.after_cancel(self.active_poll_job)
             self.active_poll_job = None
+        if self.resize_job is not None:
+            self.root.after_cancel(self.resize_job)
+            self.resize_job = None
+        if self.window_size_job is not None:
+            self.root.after_cancel(self.window_size_job)
+            self.window_size_job = None
+        if self._focus_clear_job is not None:
+            self.root.after_cancel(self._focus_clear_job)
+            self._focus_clear_job = None
+        self._cancel_group_click()
+        self._save_current_window_size()
         self.window_highlighter.hide()
         self._release_managed_pin()
         save_runtime_session(clean_shutdown=True, entries=[])
@@ -414,6 +435,22 @@ class TerminalManagerApp:
         if self.resize_job is not None:
             self.root.after_cancel(self.resize_job)
         self.resize_job = self.root.after(60, self._apply_responsive_scale)
+        if self.window_size_job is not None:
+            self.root.after_cancel(self.window_size_job)
+        self.window_size_job = self.root.after(350, self._save_current_window_size)
+
+    def _save_current_window_size(self) -> None:
+        if self.window_size_job is not None:
+            try:
+                self.root.after_cancel(self.window_size_job)
+            except tk.TclError:
+                pass
+        self.window_size_job = None
+        try:
+            if self.root.state() == "normal":
+                save_window_size(self.root.winfo_width(), self.root.winfo_height())
+        except tk.TclError:
+            pass
 
     def _apply_responsive_scale(self) -> None:
         self.resize_job = None
@@ -860,13 +897,6 @@ class TerminalManagerApp:
         if self._suppress_group_release:
             self._suppress_group_release = False
             return
-        if item_id and self.tree.exists(item_id) and self.tree.identify_region(event.x, event.y) == "cell":
-            # <<TreeviewSelect>> only fires when the selected item changes.
-            # A direct click must replay the visual locator even when the user
-            # repeatedly clicks the same already-selected row.
-            self.tree.selection_set(item_id)
-            self.tree.focus(item_id)
-            self._flash_workspace_item(item_id)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
             bounds = self.tree.bbox(item_id, "name")
             if bounds and event.x - bounds[0] <= 38:
@@ -881,6 +911,7 @@ class TerminalManagerApp:
 
     def _handle_tree_press(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
+        self._replay_clicked_row(item_id, event)
         if item_id.startswith("group:"):
             # Own every group-row mouse event so ttk's class-level double-click
             # binding can never toggle the item's open state behind our back.
@@ -891,6 +922,9 @@ class TerminalManagerApp:
 
     def _handle_tree_double_click(self, event: tk.Event) -> str | None:
         item_id = self.tree.identify_row(event.y)
+        # Tk may route the second rapid press directly to <Double-1> instead
+        # of the ordinary press binding, so replay explicitly here as well.
+        self._replay_clicked_row(item_id, event)
         if item_id.startswith("group:") and self.tree.identify_column(event.x) == "#1":
             self._cancel_group_click()
             self._suppress_group_release = True
@@ -900,6 +934,15 @@ class TerminalManagerApp:
             return "break"
         self.focus_selected(pin=True)
         return None
+
+    def _replay_clicked_row(self, item_id: str, event: tk.Event) -> None:
+        if not item_id or not self.tree.exists(item_id):
+            return
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        self._flash_workspace_item(item_id)
 
     def _schedule_group_click(self, callback) -> None:
         self._cancel_group_click()
