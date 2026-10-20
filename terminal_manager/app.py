@@ -630,7 +630,6 @@ class TerminalManagerApp:
                 "window_id": window.window_id,
             })
 
-        rows.sort(key=lambda row: activity_sort_key(row[2], row[3], row[4]))
         tab_signals = []
         for group in self.tab_groups.values():
             window = find_window(group.window_id, self.windows)
@@ -652,6 +651,14 @@ class TerminalManagerApp:
                 if tab_activity:
                     thermal_statuses[signal_id] = tab_activity.status
         self.thermal_levels = self.thermal_tracker.update(thermal_statuses)
+        rows.sort(
+            key=lambda row: activity_sort_key(
+                row[2],
+                row[3],
+                row[4],
+                self.thermal_levels.get(row[1].window_id, 0.0) if row[1] else 0.0,
+            )
+        )
         self.expanded_window_ids.intersection_update(self.tab_groups)
 
         for info, window, activity, status, name in rows:
@@ -1514,10 +1521,16 @@ def age_text(activity: ActivityState | None) -> str:
 
 
 def activity_sort_key(
-    activity: ActivityState | None, status: str, name: str
-) -> tuple[int, float, str]:
+    activity: ActivityState | None, status: str, name: str, temperature: float = 0.0
+) -> tuple[float, int, float, str]:
     order = {"waiting": 0, "active": 1, "static": 2}
-    return (order.get(status, 3), activity.seconds_in_status if activity else 0.0, name.lower())
+    normalized_temperature = min(1.0, max(0.0, temperature))
+    return (
+        -normalized_temperature,
+        order.get(status, 3),
+        activity.seconds_in_status if activity else 0.0,
+        name.lower(),
+    )
 
 
 def metric_matches(metric: str | None, status: str, unregistered: bool) -> bool:
