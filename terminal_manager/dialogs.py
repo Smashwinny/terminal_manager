@@ -70,7 +70,7 @@ class RegistrationDialog:
 
 
 class ConfirmationDialog:
-    def __init__(self, parent: tk.Misc, *, title: str, name: str, palette: dict[str, str]) -> None:
+    def __init__(self, parent: tk.Misc, *, title: str, name: str, palette: dict[str, str], description: str | None = None, action: str = "移除记录") -> None:
         self.result = False
         self.window = tk.Toplevel(parent)
         self.window.title(title)
@@ -82,13 +82,13 @@ class ConfirmationDialog:
         body.pack(fill=tk.BOTH, expand=True)
         icon = tk.Label(body, text="−", width=3, height=1, background="#3a2030", foreground="#fb8da0", font=("Ubuntu", 16, "bold"))
         icon.pack(anchor=tk.W)
-        tk.Label(body, text="移除管理记录", background=palette["bg"], foreground=palette["text"], font=("Noto Sans CJK SC", 15, "bold")).pack(anchor=tk.W, pady=(14, 4))
-        tk.Label(body, text=f"确定从总览中移除“{name}”？", background=palette["bg"], foreground=palette["muted"], font=("Noto Sans CJK SC", 10)).pack(anchor=tk.W)
-        tk.Label(body, text="只删除管理器中的名称记录，不会关闭 Shell，也不会终止正在运行的任务。", background=palette["bg"], foreground=palette["subtle"], font=("Noto Sans CJK SC", 9), wraplength=500, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
+        tk.Label(body, text=title, background=palette["bg"], foreground=palette["text"], font=("Noto Sans CJK SC", 15, "bold")).pack(anchor=tk.W, pady=(14, 4))
+        tk.Label(body, text=f"{action}：“{name}”？", background=palette["bg"], foreground=palette["muted"], font=("Noto Sans CJK SC", 10)).pack(anchor=tk.W)
+        tk.Label(body, text=description or "只删除管理器中的名称记录，不会关闭 Shell，也不会终止正在运行的任务。", background=palette["bg"], foreground=palette["subtle"], font=("Noto Sans CJK SC", 9), wraplength=500, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
         buttons = tk.Frame(body, background=palette["bg"])
         buttons.pack(fill=tk.X, pady=(22, 0))
         ttk.Button(buttons, text="取消", style="Ghost.TButton", command=self.cancel).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="移除记录", style="Danger.TButton", command=self.confirm).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(buttons, text=action, style="Danger.TButton", command=self.confirm).pack(side=tk.RIGHT, padx=(0, 8))
         self.window.bind("<Escape>", lambda _event: self.cancel())
         self.window.protocol("WM_DELETE_WINDOW", self.cancel)
         self.window.update_idletasks()

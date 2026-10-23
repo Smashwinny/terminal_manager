@@ -58,6 +58,7 @@ class ShellInfo:
     process_state: str
     registered_at: float
     last_seen: float
+    protected_id: str = ""
 
 
 STATUS_LABELS = {
@@ -72,6 +73,7 @@ STATUS_LABELS = {
     "waiting": "等待用户",
     "static": "静态/空闲",
     "window": "未注册",
+    "disconnected": "已断开 · 任务存活",
 }
 
 

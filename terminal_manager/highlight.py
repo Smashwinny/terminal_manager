@@ -50,10 +50,11 @@ class WindowHighlighter:
         self.reset_job = self.root.after(self.duration_ms, self.hide)
         return True
 
-    def hide(self) -> None:
+    def hide(self, *, reset: bool = True) -> None:
         if self.reset_job is not None:
             self.root.after_cancel(self.reset_job)
             self.reset_job = None
         if self.tty:
-            set_tty_highlight(self.tty, False)
+            if reset:
+                set_tty_highlight(self.tty, False)
             self.tty = None

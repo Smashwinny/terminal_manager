@@ -1,4 +1,9 @@
 from terminal_manager.tabs import TabGroup, TerminalTab, select_tab
+from unittest.mock import Mock, patch
+import subprocess
+
+from terminal_manager.tabs import _worker, scan_tab_groups
+from terminal_manager.model import WindowInfo
 
 
 class Selection:
@@ -33,3 +38,20 @@ def test_cached_tab_switch_and_repeat_click() -> None:
     assert select_tab(group, 1)
     assert select_tab(group, 1)
     assert selection.calls == 1
+
+
+def test_native_worker_crash_or_timeout_is_contained() -> None:
+    with patch("terminal_manager.tabs.subprocess.run", return_value=Mock(returncode=-11, stdout="")):
+        assert _worker({}) is None
+    with patch("terminal_manager.tabs.subprocess.run", side_effect=subprocess.TimeoutExpired("worker", 6)):
+        assert _worker({}) is None
+
+
+def test_tab_worker_returns_only_serializable_identity() -> None:
+    window = WindowInfo("0x2a", 0, 123, 0, 0, 800, 600, "gnome-terminal", "", "main")
+    with patch("terminal_manager.tabs._worker", return_value=[{"window_id": "0x2a", "tabs": [{"index": 0, "title": "main", "selected": True}, {"index": 1, "title": "hidden", "selected": False}]}]):
+        group = scan_tab_groups([window])[0]
+    assert group.selector == "0x2a"
+    with patch("terminal_manager.tabs._worker", return_value=True) as worker:
+        assert select_tab(group, 1)
+        assert worker.call_args.args[0]["select"] == "0x2a"

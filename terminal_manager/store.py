@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -82,13 +83,28 @@ def load_runtime_session() -> dict[str, object]:
                 continue
             required = ("shell_id", "name", "cwd", "window_id")
             if all(isinstance(entry.get(key), str) for key in required):
-                valid.append({key: entry[key] for key in required})
+                valid.append(entry)
         return {"clean_shutdown": bool(data.get("clean_shutdown", False)), "entries": valid}
     except (OSError, AttributeError, ValueError, TypeError, json.JSONDecodeError):
         return empty
 
 
 def save_runtime_session(*, clean_shutdown: bool, entries: list[dict[str, str]]) -> None:
+    previous = load_runtime_session()
+    # Closing the dashboard is not closing the terminals. Preserve the last
+    # known inventory independently of the clean-shutdown flag.
+    if clean_shutdown and not entries:
+        entries = previous["entries"]
+    if previous["entries"] and previous["entries"] != entries:
+        history = state_dir().parent / "session-history"
+        lost = {e["shell_id"] for e in previous["entries"]} - {e["shell_id"] for e in entries}
+        kind = "incident" if lost else "snapshot"
+        path = history / f"{kind}-{time.time_ns()}-{uuid.uuid4().hex[:8]}.json"
+        _atomic_private_json(path, {**previous, "saved_at": time.time(), "reason": "windows_missing" if lost else "inventory_changed"})
+        # Separate retention prevents routine updates from evicting incidents.
+        for prefix, limit in (("incident", 32), ("snapshot", 96)):
+            for stale in sorted(history.glob(f"{prefix}-*.json"), reverse=True)[limit:]:
+                stale.unlink()
     payload = {
         "version": RUNTIME_SESSION_VERSION,
         "clean_shutdown": clean_shutdown,
@@ -96,6 +112,33 @@ def save_runtime_session(*, clean_shutdown: bool, entries: list[dict[str, str]])
         "entries": entries,
     }
     _atomic_private_json(runtime_session_path(), payload)
+
+
+def recovery_candidates() -> list[dict]:
+    """Newest known directory per record, including disappeared windows/tabs."""
+    entries = list(load_runtime_session()["entries"])
+    history = state_dir().parent / "session-history"
+    paths = sorted(history.glob("*.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for path in paths:
+        try:
+            entries.extend(json.loads(path.read_text(encoding="utf-8")).get("entries", []))
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    result = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in ("shell_id", "name", "cwd", "window_id")):
+            continue
+        result.setdefault(entry["shell_id"], entry)
+    for shell in load_shells():
+        result.setdefault(shell.shell_id, {"shell_id": shell.shell_id, "window_id": shell.window_id, "name": shell.name, "cwd": shell.cwd, "protected_id": shell.protected_id})
+    return list(result.values())
+
+
+def prune_tty_bindings(window_ids: set[str]) -> None:
+    bindings = load_tty_bindings()
+    kept = {key: value for key, value in bindings.items() if key in window_ids}
+    if kept != bindings:
+        _atomic_private_json(tty_bindings_path(), {"version": TTY_BINDINGS_VERSION, "bindings": kept})
 
 
 def load_window_size() -> tuple[int, int] | None:

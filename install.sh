@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for command_name in python3 wmctrl xdotool xinput; do
+for command_name in python3 wmctrl xdotool xinput xprop; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         printf '缺少依赖：%s\n' "$command_name" >&2
-        printf 'Ubuntu/Debian 可执行：sudo apt install python3-tk wmctrl xdotool xinput\n' >&2
+        printf 'Ubuntu/Debian 可执行：sudo apt install python3-tk wmctrl xdotool xinput x11-utils\n' >&2
         exit 1
     fi
 done
@@ -25,7 +25,8 @@ icon_dir_512="${HOME}/.local/share/icons/hicolor/512x512/apps"
 mkdir -p "$desktop_dir"
 mkdir -p "$icon_dir_64"
 mkdir -p "$icon_dir_512"
-launcher="$(mktemp)"
+mkdir -p tmp
+launcher="$(mktemp "$PWD/tmp/launcher.XXXXXX")"
 trap 'rm -f "$launcher"' EXIT
 sed "s|@TERMINAL_MANAGER_EXEC@|${user_bin}/terminal-manager|g" \
     packaging/terminal-manager.desktop >"$launcher"

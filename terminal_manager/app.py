@@ -6,8 +6,12 @@ import threading
 import uuid
 import os
 import sys
+import shutil
 from pathlib import Path
-from tkinter import ttk
+from tkinter import ttk, filedialog
+from dataclasses import replace
+import logging
+from logging.handlers import RotatingFileHandler
 from tkinter import font as tkfont
 
 from . import __version__
@@ -16,6 +20,8 @@ from .dialogs import ConfirmationDialog, NoticeDialog, RegistrationDialog, Signa
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .pointer import PointerPressMonitor
+from . import protected
+from .recovery_dialog import RecoveryDialog
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
 from .recovery import launch_recovery_terminal, validate_recovery_directory
 from .store import (
@@ -31,6 +37,9 @@ from .store import (
     save_runtime_session,
     load_window_size,
     save_window_size,
+    recovery_candidates,
+    prune_tty_bindings,
+    state_dir,
 )
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
@@ -44,6 +53,7 @@ from .x11 import (
     set_window_above,
     window_is_above,
     window_title,
+    window_role,
 )
 
 
@@ -116,6 +126,9 @@ class TerminalManagerApp:
         self.items: dict[str, tuple[ShellInfo | None, WindowInfo | None]] = {}
         self.windows: list[WindowInfo] = []
         self.activities: dict[str, ActivityState] = {}
+        self.protected_states: dict[str, dict] = {}
+        self._protection_thread = None
+        self._window_roles: dict[str, str] = {}
         learned_protocol = load_learned_protocol()
         tracker_options = {
             "learned_prefixes": learned_protocol["active"],
@@ -124,10 +137,14 @@ class TerminalManagerApp:
         }
         self.activity_tracker = WindowActivityTracker(**tracker_options)
         self.tab_activity_tracker = WindowActivityTracker(**tracker_options)
+        self.protected_activity_tracker = WindowActivityTracker(**tracker_options)
+        self.protected_activities: dict[str, ActivityState] = {}
         self.thermal_tracker = ThermalTracker()
         self.thermal_levels: dict[str, float] = {}
         self.tab_groups: dict[str, TabGroup] = {}
-        self.tty_bindings = load_tty_bindings()
+        # Persisted PTY numbers can be reused after a terminal-server crash.
+        # Validate again in this manager lifetime before sending any OSC bytes.
+        self.tty_bindings = {}
         self.tab_items: dict[str, tuple[TabGroup, int]] = {}
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
@@ -161,7 +178,7 @@ class TerminalManagerApp:
         self._recovery_skipped_count = 0
         self._recovery_active = bool(self._recovery_entries)
         # Preserve the previous crash snapshot until recovery has completed.
-        save_runtime_session(clean_shutdown=False, entries=self._recovery_entries)
+        save_runtime_session(clean_shutdown=False, entries=list(previous_session["entries"]))
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
         self._capture_scalable_layout()
@@ -212,13 +229,8 @@ class TerminalManagerApp:
         brand_icon_path = Path(__file__).parent / "assets" / "terminal-manager-64.png"
         self.brand_icon_source = tk.PhotoImage(file=brand_icon_path)
         self.brand_icon_image = self.brand_icon_source
-        self.logo = tk.Label(
-            brand,
-            image=self.brand_icon_image,
-            background=PALETTE["bg"],
-            borderwidth=0,
-            highlightthickness=0,
-        )
+        self.logo = tk.Canvas(brand, width=64, height=64, background=PALETTE["bg"], borderwidth=0, highlightthickness=0)
+        self._logo_image_item = self.logo.create_image(0, 0, image=self.brand_icon_image, anchor=tk.NW)
         self.logo.pack(side=tk.LEFT, padx=(0, 13))
         titles = ttk.Frame(brand, style="App.TFrame")
         titles.pack(side=tk.LEFT)
@@ -253,6 +265,15 @@ class TerminalManagerApp:
         self._draw_thermal_toggle()
         ttk.Button(header_actions, text="信号管理", style="Ghost.TButton", command=self.manage_signals).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="登记窗口", style="Ghost.TButton", command=self.register_selected).pack(side=tk.LEFT, padx=(0, 8))
+        protection_menu = ttk.Menubutton(header_actions, text="任务保护", style="Protection.TMenubutton")
+        menu = tk.Menu(protection_menu, tearoff=False)
+        menu.add_command(label="新建保活任务…", command=self.create_protected_task)
+        menu.add_command(label="重连选中任务", command=self.reconnect_selected)
+        menu.add_command(label="结束选中保活任务…", command=self.end_protected_task)
+        menu.add_separator()
+        menu.add_command(label="恢复清单…", command=self.show_recovery)
+        protection_menu.configure(menu=menu)
+        protection_menu.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
 
         dashboard = ttk.Frame(container, style="App.TFrame")
@@ -400,6 +421,7 @@ class TerminalManagerApp:
 
     def _capture_scalable_layout(self) -> None:
         self._scalable_fonts: list[tuple[tk.Widget, dict[str, object]]] = []
+        self._responsive_fonts: dict[tk.Widget, tkfont.Font] = {}
         self._scalable_geometry: list[tuple[tk.Widget, str, object, object]] = []
         self._scalable_internal: list[tuple[tk.Widget, str, object]] = []
         self._scalable_dimensions: list[tuple[tk.Widget, int, int]] = []
@@ -408,7 +430,10 @@ class TerminalManagerApp:
             try:
                 value = widget.cget("font")
                 if value:
-                    self._scalable_fonts.append((widget, tkfont.Font(root=self.root, font=value).actual()))
+                    font = tkfont.Font(root=self.root, font=value)
+                    self._scalable_fonts.append((widget, font.actual()))
+                    self._responsive_fonts[widget] = font
+                    widget.configure(font=font)
             except tk.TclError:
                 pass
             for option in ("padding", "padx", "pady"):
@@ -466,16 +491,8 @@ class TerminalManagerApp:
         for widget, specification in self._scalable_fonts:
             try:
                 size = max(2, round(abs(int(specification["size"])) * scale))
-                styles = []
-                if specification["weight"] == "bold":
-                    styles.append("bold")
-                if specification["slant"] == "italic":
-                    styles.append("italic")
-                if specification["underline"]:
-                    styles.append("underline")
-                if specification["overstrike"]:
-                    styles.append("overstrike")
-                widget.configure(font=(specification["family"], size, *styles))
+                # Keep font ownership stable across resize/padding callbacks.
+                self._responsive_fonts[widget].configure(size=size)
             except (tk.TclError, ValueError, TypeError):
                 continue
         for widget, manager, padx, pady in self._scalable_geometry:
@@ -504,8 +521,10 @@ class TerminalManagerApp:
         for key, width in self._base_column_widths.items():
             self.tree.column(key, width=max(18, round(width * scale)), minwidth=max(18, round(70 * scale)))
         divisor = max(1, min(4, round(1 / scale)))
-        self.brand_icon_image = self.brand_icon_source.subsample(divisor, divisor)
-        self.logo.configure(image=self.brand_icon_image)
+        if not hasattr(self, "_brand_icon_variants"):
+            self._brand_icon_variants = {size: self.brand_icon_source.subsample(size, size) for size in range(1, 5)}
+        self.brand_icon_image = self._brand_icon_variants[divisor]
+        self.logo.itemconfigure(self._logo_image_item, image=self.brand_icon_image)
 
     def _configure_scaled_styles(self, scale: float) -> None:
         size = lambda value: max(2, round(value * scale))
@@ -513,6 +532,7 @@ class TerminalManagerApp:
         self.style.configure("Subtitle.TLabel", font=("Noto Sans CJK SC", size(9)))
         self.style.configure("Accent.TButton", padding=(size(15), size(8)), font=("Noto Sans CJK SC", size(9), "bold"))
         self.style.configure("Ghost.TButton", padding=(size(14), size(8)), font=("Noto Sans CJK SC", size(9)))
+        self.style.configure("Protection.TMenubutton", padding=(size(14), size(8)), font=("Noto Sans CJK SC", size(9)))
         self.style.configure("Danger.TButton", padding=(size(14), size(8)), font=("Noto Sans CJK SC", size(9)))
         self.style.configure("Shell.Treeview", rowheight=max(11, round(43 * scale)), font=("Noto Sans CJK SC", size(9)))
         self.style.configure("Shell.Treeview.Heading", padding=(size(10), size(10)), font=("Noto Sans CJK SC", size(9), "bold"))
@@ -529,6 +549,8 @@ class TerminalManagerApp:
         style.map("Accent.TButton", background=[("active", PALETTE["accent_hover"]), ("pressed", "#6657e8")])
         style.configure("Ghost.TButton", background=PALETTE["surface_2"], foreground=PALETTE["text"], borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
         style.map("Ghost.TButton", background=[("active", PALETTE["surface_3"]), ("pressed", PALETTE["border"])])
+        style.configure("Protection.TMenubutton", background=PALETTE["surface_2"], foreground=PALETTE["text"], borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
+        style.map("Protection.TMenubutton", background=[("active", PALETTE["surface_3"])])
         style.configure("Danger.TButton", background=PALETTE["surface_2"], foreground="#fb8da0", borderwidth=0, padding=(14, 8), font=("Noto Sans CJK SC", 9))
         style.map("Danger.TButton", background=[("active", "#3a2030")])
         style.configure("Shell.Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"], foreground=PALETTE["text"], borderwidth=0, relief="flat", rowheight=43, font=("Noto Sans CJK SC", 9))
@@ -571,6 +593,19 @@ class TerminalManagerApp:
         scan_ok = False
         try:
             scanned_windows = list_windows()
+            old_identities = {w.window_id: w.pid for w in self.windows}
+            live_identities = {w.window_id: w.pid for w in scanned_windows}
+            invalid = {wid for wid, pid in old_identities.items() if live_identities.get(wid) != pid}
+            if invalid:
+                self.window_highlighter.hide(reset=False)
+                for wid in invalid:
+                    self.tty_bindings.pop(wid, None)
+                    self._window_roles.pop(wid, None)
+                prune_tty_bindings(set(live_identities) - invalid)
+                if self.pinned_window_id in invalid:
+                    self.pinned_window_id = None
+                    self._pinned_was_above = False
+            self._sync_protected_windows(scanned_windows)
             scanned_activities = self.activity_tracker.update(scanned_windows)
             self.windows = scanned_windows
             self.activities = scanned_activities
@@ -585,6 +620,9 @@ class TerminalManagerApp:
             error = f"{exc}；已保留上一次有效状态，正在重试。"
 
         shells = load_shells()
+        self._request_protection_scan(shells)
+        signals = [WindowInfo(task_id, 0, 0, 0, 0, 0, 0, "", "", state["title"]) for task_id, state in self.protected_states.items() if "title" in state]
+        self.protected_activities = self.protected_activity_tracker.update(signals)
         tty_cwds = terminal_tty_cwds()
         live_session_entries: list[dict[str, str]] = []
 
@@ -600,18 +638,28 @@ class TerminalManagerApp:
             info = records_by_window.get(window.window_id)
             if info:
                 used_record_ids.add(info.shell_id)
-            activity = self.activities.get(window.window_id)
+            activity = self.protected_activities.get(info.protected_id) if info and info.protected_id else self.activities.get(window.window_id)
             status = activity.status if activity else "unknown"
             name = info.name if info else (window.title or "终端窗口")
             rows.append((info, window, activity, status, name))
         for info in shells:
             if info.shell_id not in used_record_ids:
-                rows.append((info, None, None, "ended", info.name))
+                protected_state = self.protected_states.get(info.protected_id, {})
+                status = "disconnected" if protected_state and not protected_state.get("error") else "unknown" if info.protected_id else "ended"
+                rows.append((info, None, self.protected_activities.get(info.protected_id), status, info.name))
 
         # Persist every live registered window independently of search/filter
         # state. UI filtering must never remove an entry from the crash
         # recovery snapshot.
         for info, window, _activity, _status, _name in rows:
+            if info and info.protected_id and not window:
+                state = self.protected_states.get(info.protected_id, {})
+                cwd = state.get("cwd", info.cwd)
+                if cwd != info.cwd:
+                    info.cwd = cwd
+                    save_shell(info)
+                live_session_entries.append({"shell_id": info.shell_id, "name": info.name, "cwd": cwd, "window_id": "", "protected_id": info.protected_id})
+                continue
             if not info or not window:
                 continue
             group = self.tab_groups.get(window.window_id)
@@ -628,7 +676,16 @@ class TerminalManagerApp:
                 "name": info.name,
                 "cwd": cwd,
                 "window_id": window.window_id,
+                "protected_id": info.protected_id,
             })
+            if group:
+                for tab in group.tabs:
+                    if tab.selected:
+                        continue
+                    tty = self.tty_bindings.get(window.window_id, {}).get(f"tab:{tab.index}", "")
+                    tab_cwd = tty_cwds.get(tty, "")
+                    if tab_cwd:
+                        live_session_entries.append({"shell_id": f"{info.shell_id}:tab:{tab.index}", "name": f"{info.name} / {tab.title}", "cwd": tab_cwd, "window_id": window.window_id, "tab_index": tab.index})
 
         tab_signals = []
         for group in self.tab_groups.values():
@@ -642,6 +699,10 @@ class TerminalManagerApp:
         thermal_statuses = {
             window_id: activity.status for window_id, activity in self.activities.items()
         }
+        for info in shells:
+            if info.protected_id:
+                thermal_statuses.pop(info.window_id, None)
+        thermal_statuses.update({key: activity.status for key, activity in self.protected_activities.items()})
         for group in self.tab_groups.values():
             for tab in group.tabs:
                 if tab.selected:
@@ -656,7 +717,7 @@ class TerminalManagerApp:
                 row[2],
                 row[3],
                 row[4],
-                self.thermal_levels.get(row[1].window_id, 0.0) if row[1] else 0.0,
+                self.thermal_levels.get(row[0].protected_id if row[0] and row[0].protected_id else row[1].window_id if row[1] else "", 0.0),
             )
         )
         self.expanded_window_ids.intersection_update(self.tab_groups)
@@ -690,7 +751,7 @@ class TerminalManagerApp:
                     info is None,
                     window.window_id if window else "",
                     item_id=iid,
-                    temperature=self.thermal_levels.get(window.window_id, 0.0) if window else 0.0,
+                    temperature=self.thermal_levels.get(info.protected_id if info and info.protected_id else window.window_id if window else "", 0.0),
                 ),
             )
             row_index += 1
@@ -735,6 +796,11 @@ class TerminalManagerApp:
         running = sum(1 for state in self.activities.values() if state.status == "active")
         waiting = sum(1 for state in self.activities.values() if state.status == "waiting")
         idle = sum(1 for state in self.activities.values() if state.status == "static")
+        for info, window, activity, status, name in rows:
+            if not window and info and info.protected_id and activity:
+                running += activity.status == "active"
+                waiting += activity.status == "waiting"
+                idle += activity.status == "static"
         values = {"total": total, "waiting": waiting, "running": running, "idle": idle, "unregistered": unregistered}
         for key, value in values.items():
             self.metric_values[key].configure(text=str(value))
@@ -759,6 +825,12 @@ class TerminalManagerApp:
             self._finish_recovery()
             return
         entry = self._recovery_entries[self._recovery_index]
+        if entry.get("protected_id"):
+            # Protected sessions survive the manager. Reconnection is explicit;
+            # an old boot/session must never fall back to launching a new task.
+            self._recovery_index += 1
+            self.root.after(0, self._restore_next_window)
+            return
         live_ids = {window.window_id for window in self.windows}
         if entry["window_id"] in live_ids:
             self._recovery_skipped_count += 1
@@ -772,7 +844,8 @@ class TerminalManagerApp:
             self.root.after(0, self._restore_next_window)
             return
         self._recovery_before_ids = live_ids
-        started, reason = launch_recovery_terminal(directory)
+        self._recovery_token = f"tm-recover-{uuid.uuid4().hex}" if shutil.which("gnome-terminal") else None
+        started, reason = launch_recovery_terminal(directory, self._recovery_token)
         if not started:
             self._record_recovery_error(entry, reason)
             self._recovery_index += 1
@@ -788,8 +861,13 @@ class TerminalManagerApp:
         except X11Error:
             windows = []
         candidates = [window for window in windows if window.window_id not in self._recovery_before_ids]
+        token = getattr(self, "_recovery_token", None)
+        if token:
+            candidates = [window for window in candidates if window_role(window.window_id) == token]
+        elif len(candidates) != 1:
+            candidates = []
         if candidates:
-            window = candidates[-1]
+            window = candidates[0]
             shell = next((item for item in load_shells() if item.shell_id == entry["shell_id"]), None)
             now = time.time()
             if shell is None:
@@ -884,6 +962,10 @@ class TerminalManagerApp:
     ) -> str:
         window_id = window.window_id if window else shell.window_id if shell else ""
         tty = self.tty_bindings.get(window_id, {}).get(tab_key, "")
+        if shell and shell.protected_id:
+            state = self.protected_states.get(shell.protected_id, {})
+            if state.get("cwd"):
+                return state["cwd"]
         if tty in tty_cwds:
             return tty_cwds[tty]
         if shell and shell.tty in tty_cwds:
@@ -1104,6 +1186,7 @@ class TerminalManagerApp:
         self.style.configure("Accent.TButton", background=accent)
         self.style.map("Accent.TButton", background=[("active", hover), ("pressed", accent)])
         self.style.configure("Ghost.TButton", background=themed["surface_2"])
+        self.style.configure("Protection.TMenubutton", background=themed["surface_2"])
         self.style.map("Ghost.TButton", background=[("active", themed["surface_3"]), ("pressed", themed["border"])])
         self.style.configure("Danger.TButton", background=themed["surface_2"])
         self.style.configure(
@@ -1182,6 +1265,9 @@ class TerminalManagerApp:
         if not selected:
             return
         iid, shell, window = selected
+        if shell and shell.protected_id and not window:
+            self.reconnect_selected()
+            return
         tab_target = self.tab_items.get(iid)
         if tab_target:
             group, tab_index = tab_target
@@ -1212,6 +1298,20 @@ class TerminalManagerApp:
             tab_key = "main"
 
         tty = self.tty_bindings.get(window_id, {}).get(tab_key, "")
+        if shell and shell.protected_id:
+            try:
+                state = protected.inspect_task(shell.protected_id)
+            except protected.ProtectionError as exc:
+                self._notice("保活任务", str(exc), kind="error")
+                return
+            # OSC targets the attached emulator, never the inner tmux PTY.
+            role = self._window_roles.get(window_id, "")
+            tty = next((view["tty"] for view in state["views"] if view["role"] == role), "")
+            if tty:
+                self.window_highlighter.flash(tty)
+            else:
+                self.details.configure(text="任务已聚焦；窗口连接正在建立，高亮将在连接就绪后可用。")
+            return
         if not can_highlight_tty(tty):
             tty = ""
         if not tty:
@@ -1328,6 +1428,13 @@ class TerminalManagerApp:
             text = "暂时无法取得该窗口的画面活动；窗口可能已经关闭。"
         if not window:
             text += "\n当前窗口 ID 已不存在；Shell 可能结束或窗口已经关闭。"
+        if shell and shell.protected_id:
+            state = self.protected_states.get(shell.protected_id, {})
+            if state.get("error"):
+                text = "保活任务：" + state["error"]
+            else:
+                activity = self.protected_activities.get(shell.protected_id)
+                text = (activity_explanation(activity) if activity else "正在查询保活任务…") + "\n保活模式：关闭窗口后任务继续运行。使用任务保护菜单可重连或明确结束任务。"
         elif iid in self.tab_items:
             text += "\n这是同一终端窗口中的隐藏标签；单击即可切换到该标签。"
         if window_id and window_id == self.pinned_window_id:
@@ -1367,7 +1474,7 @@ class TerminalManagerApp:
         for status, prefixes in dialog.result.items():
             for prefix in prefixes:
                 assign_learned_signal(protocol, status, prefix)
-        for tracker in (self.activity_tracker, self.tab_activity_tracker):
+        for tracker in (self.activity_tracker, self.tab_activity_tracker, self.protected_activity_tracker):
             tracker.learned_spinner_prefixes = set(protocol["active"])
             tracker.learned_waiting_prefixes = set(protocol["waiting"])
             tracker.learned_static_prefixes = set(protocol["static"])
@@ -1381,7 +1488,7 @@ class TerminalManagerApp:
         if dialog.result is None:
             return
         save_learned_protocol(dialog.result)
-        for tracker in (self.activity_tracker, self.tab_activity_tracker):
+        for tracker in (self.activity_tracker, self.tab_activity_tracker, self.protected_activity_tracker):
             tracker.learned_spinner_prefixes = set(dialog.result["active"])
             tracker.learned_waiting_prefixes = set(dialog.result["waiting"])
             tracker.learned_static_prefixes = set(dialog.result["static"])
@@ -1481,6 +1588,103 @@ class TerminalManagerApp:
 
     def _notice(self, title: str, message: str, *, kind: str = "info") -> None:
         NoticeDialog(self.root, title=title, message=message, palette=PALETTE, kind=kind)
+
+    def _request_protection_scan(self, shells) -> None:
+        if self._protection_thread and self._protection_thread.is_alive():
+            return
+        ids = [s.protected_id for s in shells if s.protected_id]
+        def scan():
+            states = {}
+            for task_id in ids:
+                try:
+                    states[task_id] = protected.inspect_task(task_id)
+                except protected.ProtectionError as exc:
+                    states[task_id] = {"error": str(exc)}
+            self.protected_states = states
+        self._protection_thread = threading.Thread(target=scan, daemon=True, name="protected-task-scan")
+        self._protection_thread.start()
+
+    def _sync_protected_windows(self, windows) -> None:
+        shells = [s for s in load_shells() if s.protected_id]
+        if not shells:
+            return
+        for window in windows:
+            if window.window_id not in self._window_roles:
+                self._window_roles[window.window_id] = window_role(window.window_id)
+        for shell in shells:
+            matches = [w for w in windows if self._window_roles.get(w.window_id, "").startswith(f"terminal-manager-{shell.protected_id}-")]
+            match = next((w for w in matches if w.window_id == shell.window_id), matches[0] if matches else None)
+            state = self.protected_states.get(shell.protected_id, {})
+            if match:
+                index = windows.index(match)
+                windows[index] = replace(match, title=state.get("title", match.title))
+                if shell.window_id != match.window_id or state.get("cwd", shell.cwd) != shell.cwd:
+                    shell.window_id = match.window_id
+                    shell.cwd = state.get("cwd", shell.cwd)
+                    save_shell(shell)
+            elif shell.window_id:
+                # XIDs are reused when a terminal server restarts. An absent
+                # role must not let an old task claim another task's window.
+                shell.window_id = ""
+                save_shell(shell)
+
+    def create_protected_task(self) -> None:
+        directory = filedialog.askdirectory(parent=self.root, title="新建保活任务：选择工作目录")
+        if not directory:
+            return
+        try:
+            task_id = protected.create_task(directory, Path(directory).name)
+            protected.open_task(task_id)
+        except protected.ProtectionError as exc:
+            self._notice("保活任务", str(exc), kind="error")
+        self.refresh()
+
+    def reconnect_selected(self) -> None:
+        selected = self.selected()
+        if not selected or not selected[1] or not selected[1].protected_id:
+            self._notice("重连任务", "请选择保活任务；普通记录可从恢复清单打开目录。")
+            return
+        if selected[2]:
+            self.focus_selected()
+            return
+        try:
+            protected.open_task(selected[1].protected_id)
+        except protected.ProtectionError as exc:
+            self._notice("重连任务", str(exc), kind="error")
+
+    def end_protected_task(self) -> None:
+        selected = self.selected()
+        if not selected or not selected[1] or not selected[1].protected_id:
+            self._notice("结束任务", "请选择一个保活任务。")
+            return
+        shell = selected[1]
+        dialog = ConfirmationDialog(self.root, title="结束保活任务", name=shell.name, palette=PALETTE, action="结束任务", description="这会停止该任务的 Shell 和全部子进程。仅关闭终端窗口则任务继续运行。")
+        if dialog.result:
+            try:
+                protected.end_task(shell.protected_id)
+            except protected.ProtectionError as exc:
+                self._notice("结束任务", str(exc), kind="error")
+            self.refresh()
+
+    def show_recovery(self) -> None:
+        dialog = RecoveryDialog(self.root, recovery_candidates(), PALETTE)
+        if not dialog.result:
+            return
+        entry = dialog.result
+        if entry.get("protected_id"):
+            try:
+                protected.open_task(entry["protected_id"])
+            except protected.ProtectionError as exc:
+                self._notice("重连任务", str(exc), kind="error")
+            return
+        if self._recovery_active:
+            self._notice("恢复清单", "已有恢复流程正在进行，请等待完成。")
+            return
+        self._recovery_entries = [entry]
+        self._recovery_index = self._recovery_restored_count = self._recovery_skipped_count = 0
+        self._recovery_errors = []
+        self._recovery_active = True
+        self._restore_next_window()
 
 def status_text(status: str) -> str:
     return f"{STATUS_DOTS.get(status, '●')}  {STATUS_LABELS.get(status, status)}"
@@ -1592,6 +1796,13 @@ def tab_window_signal(window: WindowInfo, tab: TerminalTab) -> WindowInfo:
 
 
 def main() -> None:
+    log_directory = state_dir().parent
+    log_directory.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_directory / "window-operations.log", maxBytes=2_000_000, backupCount=3)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger = logging.getLogger("terminal_manager.x11")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
     if not os.environ.get(DETACHED_CHILD_ENV):
         probe = SingleInstance()
         if not probe.acquire():

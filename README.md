@@ -4,7 +4,21 @@
 
 产品需求、实现状态和验收证据见 [REQUIREMENTS.md](REQUIREMENTS.md)。
 
-Terminal Manager 不接管 PTY、不迁移 Shell，也不会终止现有任务。它是现有终端之上的轻量控制面板。
+普通模式是现有终端之上的轻量控制面板，不迁移 Shell。0.27.0 新增可选的保活任务：通过独立 tmux 服务运行新 Shell，关闭终端窗口仍可继续运行；只有明确选择“结束选中保活任务”才会停止该任务。
+
+## 终端崩溃后的损失防护（0.27.0）
+
+- **已有普通窗口**：动态保存登记目录；窗口消失前的清单另存历史。顶部“任务保护 → 恢复清单”可手动按目录重新打开并登记。不会重放命令或恢复已经退出的进程。
+- **新建保活任务**：选择“任务保护 → 新建保活任务”，选目录后在新终端中工作。每个任务使用独立 tmux 服务器和 systemd 用户服务，与 GNOME Terminal 的进程组分离。窗口关闭或终端服务器崩溃后，从管理器重连原任务。
+- **结束与移除**：“结束选中保活任务”经确认停止该任务及子进程；“移除记录”只删除管理器登记，不停止任务。移除后可用 `terminal-manager-task list` 查找，再用 `terminal-manager-task open <ID>` 重连。
+- **恢复边界**：已有普通 Shell 不会自动转成保活任务。断电、重启、任务自身崩溃、系统 OOM 或用户服务被清理仍可能终止任务；重启后可以选择“仅打开目录”，但不自动重启原命令。应用自身的数据检查点仍需由应用保存。
+- **目录与标签**：保活任务从 tmux 查询当前目录和标题；普通隐藏标签仅保存已成功识别 TTY 的目录，未识别目录不会猜测。当前每个保活任务以一个终端窗口为主要管理入口。
+
+保活模式额外依赖 `tmux` 和可用的 `systemd --user`。可执行 `sudo apt install tmux`；Ubuntu amd64 无管理员权限时可在项目目录运行 `./install-protection.sh`，将发行版软件包解包到用户目录。普通模式不要求 tmux。
+
+恢复数据位于 `${XDG_STATE_HOME:-~/.local/state}/terminal-manager/`：`runtime-session.json` 保存最近清单，`session-history/` 分别保留最多 32 份窗口消失快照和 96 份普通变更快照，`protected/` 保存保活身份。JSON 原子写入、文件权限 0600。历史是有限保留，并非永久备份。`window-operations.log` 记录带时间戳的窗口操作，2 MiB 轮转，另保留 3 份。
+
+验证：自动化测试覆盖快照丢失、干净退出、旧启动任务拒绝重连、X11 失败停止后续动作；`tests/manual_protection_smoke.py` 在独立 Xvfb/D-Bus 桌面中结束测试 GNOME Terminal 服务器，检查任务 PID 不变、计数连续、重连和管理器高亮。此脚本需要项目 `tmp/` 下的隔离测试依赖及状态目录，不对真实桌面执行故障注入。
 
 ## 当前能力
 
@@ -82,7 +96,7 @@ Ubuntu/Debian 一次安装全部依赖：
 ```bash
 sudo apt update
 sudo apt install git python3 python3-pip python3-tk python3-pyatspi \
-  wmctrl xdotool xinput x11-apps ffmpeg
+  wmctrl xdotool xinput x11-apps x11-utils ffmpeg
 ```
 
 缺少 `python3-pyatspi` 时，普通终端窗口仍能显示，但 GNOME Terminal 多标签识别不可用。缺少 `xwd` 或 `ffmpeg` 时，聚焦和震动仍可用，但未知标签无法自动学习 TTY 并改变终端背景色。

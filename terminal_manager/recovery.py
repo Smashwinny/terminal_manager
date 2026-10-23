@@ -19,7 +19,7 @@ def validate_recovery_directory(value: str) -> tuple[Path | None, str]:
     return directory, ""
 
 
-def recovery_command(directory: Path) -> list[str] | None:
+def recovery_command(directory: Path, token: str | None = None) -> list[str] | None:
     candidates = (
         ("gnome-terminal", ["gnome-terminal", "--window", f"--working-directory={directory}"]),
         ("kgx", ["kgx", "--working-directory", str(directory)]),
@@ -29,12 +29,14 @@ def recovery_command(directory: Path) -> list[str] | None:
     )
     for executable, command in candidates:
         if shutil.which(executable):
+            if token and executable == "gnome-terminal":
+                command.append(f"--role={token}")
             return command
     return None
 
 
-def launch_recovery_terminal(directory: Path) -> tuple[bool, str]:
-    command = recovery_command(directory)
+def launch_recovery_terminal(directory: Path, token: str | None = None) -> tuple[bool, str]:
+    command = recovery_command(directory, token)
     if command is None:
         return False, "没有找到支持按目录启动的终端程序"
     try:

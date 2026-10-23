@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import time
+import logging
 from typing import Iterable
 
 from .model import WindowInfo, normalize_window_id
@@ -13,10 +14,41 @@ class X11Error(RuntimeError):
     pass
 
 
+log = logging.getLogger("terminal_manager.x11")
+
+
+def window_exists(window_id: str) -> bool:
+    try:
+        result = subprocess.run(["xprop", "-id", normalize_window_id(window_id), "WM_CLASS"], capture_output=True, text=True, timeout=1)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def window_role(window_id: str) -> str:
+    try:
+        result = subprocess.run(["xprop", "-id", window_id, "WM_WINDOW_ROLE"], capture_output=True, text=True, timeout=1)
+        return result.stdout.partition(" = ")[2].strip().strip('"') if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _operate(command: list[str], wid: str, timeout: float = 2) -> None:
+    started = time.monotonic()
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("window=%s op=%s failure=%s elapsed=%.3f", wid, command[0:2], type(exc).__name__, time.monotonic() - started)
+        raise X11Error("目标窗口响应超时或操作失败，已停止本次操作") from exc
+    log.info("window=%s op=%s rc=%s elapsed=%.3f", wid, command[0:2], result.returncode, time.monotonic() - started)
+    if result.returncode:
+        raise X11Error("目标窗口已失效或拒绝操作，已停止本次操作")
+
+
 def require_x11() -> None:
     if not os.environ.get("DISPLAY"):
         raise X11Error("未检测到 DISPLAY；Terminal Manager 当前需要 Linux X11 桌面会话。")
-    missing = [tool for tool in ("wmctrl", "xdotool") if not shutil.which(tool)]
+    missing = [tool for tool in ("wmctrl", "xdotool", "xprop") if not shutil.which(tool)]
     if missing:
         raise X11Error("缺少窗口控制工具：" + ", ".join(missing))
 
@@ -87,17 +119,15 @@ def window_title(window_id: str) -> str | None:
 def focus_window(window_id: str, *, shake: bool = True, sync: bool = True) -> None:
     require_x11()
     wid = normalize_window_id(window_id)
-    try:
-        # wmctrl switches desktop when necessary; xdotool then raises and focuses it.
-        subprocess.run(["wmctrl", "-i", "-a", wid], timeout=3, check=False)
-        subprocess.run(["xdotool", "windowraise", wid], timeout=2, check=False)
-        activate = ["xdotool", "windowactivate"]
-        if sync:
-            activate.append("--sync")
-        activate.append(wid)
-        subprocess.run(activate, timeout=3, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise X11Error("目标窗口响应超时，可能已经关闭") from exc
+    if not window_exists(wid):
+        raise X11Error("目标窗口不存在或响应超时")
+    _operate(["wmctrl", "-i", "-a", wid], wid, 3)
+    _operate(["xdotool", "windowraise", wid], wid)
+    activate = ["xdotool", "windowactivate"]
+    if sync:
+        activate.append("--sync")
+    activate.append(wid)
+    _operate(activate, wid, 3)
     if shake:
         shake_window(wid)
 
@@ -123,17 +153,10 @@ def set_window_above(window_id: str, enabled: bool) -> bool:
     require_x11()
     wid = normalize_window_id(window_id)
     operation = "add,above" if enabled else "remove,above"
-    try:
-        result = subprocess.run(
-            ["wmctrl", "-i", "-r", wid, "-b", operation],
-            timeout=3,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    if not window_exists(wid):
         return False
-    return result.returncode == 0
+    _operate(["wmctrl", "-i", "-r", wid, "-b", operation], wid, 3)
+    return True
 
 
 def shake_window(window_id: str) -> None:
@@ -149,26 +172,12 @@ def shake_window(window_id: str) -> None:
     applied = 0
     try:
         for delta in deltas:
-            result = subprocess.run(
-                ["xdotool", "windowmove", "--relative", wid, str(delta), "0"],
-                timeout=1,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if result.returncode != 0:
-                break
+            _operate(["xdotool", "windowmove", "--relative", wid, str(delta), "0"], wid, 1)
             applied += delta
             time.sleep(0.04)
     finally:
-        if applied:
-            subprocess.run(
-                ["xdotool", "windowmove", "--relative", wid, str(-applied), "0"],
-                timeout=1,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        if applied and window_exists(wid):
+            _operate(["xdotool", "windowmove", "--relative", wid, str(-applied), "0"], wid, 1)
 
 
 def find_window(window_id: str, windows: Iterable[WindowInfo]) -> WindowInfo | None:
