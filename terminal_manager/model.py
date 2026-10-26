@@ -59,6 +59,9 @@ class ShellInfo:
     registered_at: float
     last_seen: float
     protected_id: str = ""
+    codex_session_id: str = ""
+    codex_cwd: str = ""
+    codex_home: str = ""
 
 
 STATUS_LABELS = {

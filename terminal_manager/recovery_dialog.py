@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk
+from datetime import datetime
 
 
 class RecoveryDialog:
@@ -9,8 +10,7 @@ class RecoveryDialog:
         window.title("恢复清单")
         window.configure(background=palette["bg"])
         window.transient(parent)
-        window.grab_set()
-        ttk.Label(window, text="保活任务连接原会话；普通记录只打开目录。外部关闭的窗口也会保留在清单中。", style="Subtitle.TLabel").pack(padx=15, pady=12)
+        ttk.Label(window, text="保活任务连接原进程；已关联 Codex 的记录打开原对话；其余只恢复目录。", style="Subtitle.TLabel").pack(padx=15, pady=12)
         frame = ttk.Frame(window)
         frame.pack(fill=tk.BOTH, expand=True, padx=15)
         tree = ttk.Treeview(frame, columns=("name", "cwd", "mode"), show="headings", height=14)
@@ -22,11 +22,13 @@ class RecoveryDialog:
             tree.column(column, width=width)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         for index, entry in enumerate(entries):
-            tree.insert("", tk.END, iid=str(index), values=(entry["name"], entry["cwd"], "连接原任务" if entry.get("protected_id") else "仅打开目录"))
+            tree.insert("", tk.END, iid=str(index), values=(entry["name"], entry["cwd"], "连接原任务" if entry.get("protected_id") else "Codex 原对话" if entry.get("codex_session_id") else "仅打开目录"))
         def restore(directory_only=False):
             selected = tree.selection()
             if selected:
                 self.result = dict(entries[int(selected[0])])
+                if directory_only:
+                    self.result.update(codex_session_id="", codex_cwd="", codex_home="")
                 if directory_only and self.result.get("protected_id"):
                     # A new ordinary record preserves the original task identity.
                     self.result.update(shell_id=self.result["shell_id"] + "-directory", window_id="", protected_id="")
@@ -34,4 +36,37 @@ class RecoveryDialog:
         ttk.Button(window, text="恢复选中项", command=restore).pack(pady=12)
         ttk.Button(window, text="仅打开目录（不恢复进程）", command=lambda: restore(True)).pack(pady=(0, 12))
         tree.bind("<Double-1>", lambda event: restore())
+        window.wait_visibility()
+        window.grab_set()
+        parent.wait_window(window)
+
+
+class CodexSessionDialog:
+    def __init__(self, parent, entries, palette):
+        self.result = None
+        window = tk.Toplevel(parent)
+        window.title("关联准确的 Codex 对话")
+        window.configure(background=palette["bg"])
+        window.transient(parent)
+        ttk.Label(window, text="选择原对话。这里只保存关联，不会启动任务或发送消息。", style="Subtitle.TLabel").pack(padx=15, pady=12)
+        frame = ttk.Frame(window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=15)
+        tree = ttk.Treeview(frame, columns=("title", "time", "id"), show="headings", height=12, selectmode="browse")
+        for column, label, width in (("title", "对话", 400), ("time", "更新时间", 150), ("id", "会话 ID", 290)):
+            tree.heading(column, text=label)
+            tree.column(column, width=width)
+        scroll = ttk.Scrollbar(frame, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+        for index, entry in enumerate(entries):
+            tree.insert("", tk.END, iid=str(index), values=(entry["label"], datetime.fromtimestamp(entry["updated_at"]).strftime("%Y-%m-%d %H:%M"), entry["id"]))
+        def choose():
+            if tree.selection():
+                self.result = entries[int(tree.selection()[0])]
+                window.destroy()
+        ttk.Button(window, text="保存关联", command=choose).pack(pady=12)
+        tree.bind("<Double-1>", lambda event: choose())
+        window.wait_visibility()
+        window.grab_set()
         parent.wait_window(window)

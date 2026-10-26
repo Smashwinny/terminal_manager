@@ -130,7 +130,9 @@ def recovery_candidates() -> list[dict]:
             continue
         result.setdefault(entry["shell_id"], entry)
     for shell in load_shells():
-        result.setdefault(shell.shell_id, {"shell_id": shell.shell_id, "window_id": shell.window_id, "name": shell.name, "cwd": shell.cwd, "protected_id": shell.protected_id})
+        result.setdefault(shell.shell_id, {"shell_id": shell.shell_id, "window_id": shell.window_id, "name": shell.name, "cwd": shell.cwd, "protected_id": shell.protected_id, "codex_session_id": shell.codex_session_id, "codex_cwd": shell.codex_cwd, "codex_home": shell.codex_home})
+        if shell.codex_session_id:
+            result[shell.shell_id].update(codex_session_id=shell.codex_session_id, codex_cwd=shell.codex_cwd, codex_home=shell.codex_home)
     return list(result.values())
 
 

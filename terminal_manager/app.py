@@ -20,8 +20,8 @@ from .dialogs import ConfirmationDialog, NoticeDialog, RegistrationDialog, Signa
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .pointer import PointerPressMonitor
-from . import protected
-from .recovery_dialog import RecoveryDialog
+from . import protected, codex_sessions
+from .recovery_dialog import RecoveryDialog, CodexSessionDialog
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
 from .recovery import launch_recovery_terminal, validate_recovery_directory
 from .store import (
@@ -128,6 +128,8 @@ class TerminalManagerApp:
         self.activities: dict[str, ActivityState] = {}
         self.protected_states: dict[str, dict] = {}
         self._protection_thread = None
+        self._codex_thread = None
+        self._codex_snapshot = ([], [])
         self._window_roles: dict[str, str] = {}
         learned_protocol = load_learned_protocol()
         tracker_options = {
@@ -272,6 +274,8 @@ class TerminalManagerApp:
         menu.add_command(label="结束选中保活任务…", command=self.end_protected_task)
         menu.add_separator()
         menu.add_command(label="恢复清单…", command=self.show_recovery)
+        menu.add_separator()
+        menu.add_command(label="关联 Codex 会话…", command=self.link_codex_session)
         protection_menu.configure(menu=menu)
         protection_menu.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
@@ -621,6 +625,7 @@ class TerminalManagerApp:
 
         shells = load_shells()
         self._request_protection_scan(shells)
+        self._request_codex_scan()
         signals = [WindowInfo(task_id, 0, 0, 0, 0, 0, 0, "", "", state["title"]) for task_id, state in self.protected_states.items() if "title" in state]
         self.protected_activities = self.protected_activity_tracker.update(signals)
         tty_cwds = terminal_tty_cwds()
@@ -658,7 +663,12 @@ class TerminalManagerApp:
                 if cwd != info.cwd:
                     info.cwd = cwd
                     save_shell(info)
-                live_session_entries.append({"shell_id": info.shell_id, "name": info.name, "cwd": cwd, "window_id": "", "protected_id": info.protected_id})
+                detected = codex_sessions.detect(state.get("title", ""), cwd, state.get("pane_tty", ""), *self._codex_snapshot)
+                if detected:
+                    for key, value in detected.items():
+                        setattr(info, key, value)
+                    save_shell(info)
+                live_session_entries.append({"shell_id": info.shell_id, "name": info.name, "cwd": cwd, "window_id": "", "protected_id": info.protected_id, **{key: getattr(info, key) for key in codex_sessions.FIELDS}})
                 continue
             if not info or not window:
                 continue
@@ -667,6 +677,14 @@ class TerminalManagerApp:
             cwd = self._directory_for(info, window, tab_key, tty_cwds)
             if not cwd:
                 continue
+            tty = self.tty_bindings.get(window.window_id, {}).get(tab_key, "")
+            if info.protected_id:
+                tty = self.protected_states.get(info.protected_id, {}).get("pane_tty", "")
+            detected = codex_sessions.detect(window.title, cwd, tty, *self._codex_snapshot)
+            if detected and any(getattr(info, key) != value for key, value in detected.items()):
+                for key, value in detected.items():
+                    setattr(info, key, value)
+                save_shell(info)
             if info.cwd != cwd:
                 info.cwd = cwd
                 info.last_seen = time.time()
@@ -677,6 +695,7 @@ class TerminalManagerApp:
                 "cwd": cwd,
                 "window_id": window.window_id,
                 "protected_id": info.protected_id,
+                **{key: getattr(info, key) for key in codex_sessions.FIELDS},
             })
             if group:
                 for tab in group.tabs:
@@ -685,7 +704,8 @@ class TerminalManagerApp:
                     tty = self.tty_bindings.get(window.window_id, {}).get(f"tab:{tab.index}", "")
                     tab_cwd = tty_cwds.get(tty, "")
                     if tab_cwd:
-                        live_session_entries.append({"shell_id": f"{info.shell_id}:tab:{tab.index}", "name": f"{info.name} / {tab.title}", "cwd": tab_cwd, "window_id": window.window_id, "tab_index": tab.index})
+                        session = codex_sessions.detect(tab.title, tab_cwd, tty, *self._codex_snapshot)
+                        live_session_entries.append({"shell_id": f"{info.shell_id}:tab:{tab.index}", "name": f"{info.name} / {tab.title}", "cwd": tab_cwd, "window_id": window.window_id, "tab_index": tab.index, **session})
 
         tab_signals = []
         for group in self.tab_groups.values():
@@ -831,6 +851,12 @@ class TerminalManagerApp:
             self._recovery_index += 1
             self.root.after(0, self._restore_next_window)
             return
+        sid = entry.get("codex_session_id", "")
+        if sid and codex_sessions.is_live(sid, entry.get("codex_home", "")):
+            self._recovery_skipped_count += 1
+            self._recovery_index += 1
+            self.root.after(0, self._restore_next_window)
+            return
         live_ids = {window.window_id for window in self.windows}
         if entry["window_id"] in live_ids:
             self._recovery_skipped_count += 1
@@ -845,7 +871,8 @@ class TerminalManagerApp:
             return
         self._recovery_before_ids = live_ids
         self._recovery_token = f"tm-recover-{uuid.uuid4().hex}" if shutil.which("gnome-terminal") else None
-        started, reason = launch_recovery_terminal(directory, self._recovery_token)
+        session = {key: entry.get(key, "") for key in codex_sessions.FIELDS} if sid else {}
+        started, reason = launch_recovery_terminal(directory, self._recovery_token, **session)
         if not started:
             self._record_recovery_error(entry, reason)
             self._recovery_index += 1
@@ -892,6 +919,13 @@ class TerminalManagerApp:
                 shell.status = "unbound"
                 shell.status_detail = "异常退出后已按保存目录恢复"
                 shell.last_seen = now
+            # Old PTY numbers and PIDs may now identify an unrelated terminal.
+            shell.tty = ""
+            shell.shell_pid = 0
+            shell.foreground_pid = None
+            shell.command = ""
+            for key in codex_sessions.FIELDS:
+                setattr(shell, key, entry.get(key, ""))
             save_shell(shell)
             self._recovery_restored_count += 1
             self._recovery_index += 1
@@ -968,8 +1002,8 @@ class TerminalManagerApp:
                 return state["cwd"]
         if tty in tty_cwds:
             return tty_cwds[tty]
-        if shell and shell.tty in tty_cwds:
-            return tty_cwds[shell.tty]
+        # Only mappings verified during this manager lifetime can supply a CWD.
+        # Persisted shell.tty may have been reused after a crash or reboot.
         return shell.cwd if shell and shell.cwd else ""
 
     def selected(self) -> tuple[str, ShellInfo | None, WindowInfo | None] | None:
@@ -1437,6 +1471,8 @@ class TerminalManagerApp:
                 text = (activity_explanation(activity) if activity else "正在查询保活任务…") + "\n保活模式：关闭窗口后任务继续运行。使用任务保护菜单可重连或明确结束任务。"
         elif iid in self.tab_items:
             text += "\n这是同一终端窗口中的隐藏标签；单击即可切换到该标签。"
+        if shell and shell.codex_session_id:
+            text += f"\n已记录 Codex 原对话：{shell.codex_session_id}。恢复时仅打开对话，不发送新指令。"
         if window_id and window_id == self.pinned_window_id:
             text += "\n📌 该终端由双击操作置顶；双击其他终端会转移置顶。"
         self.details.configure(text=text)
@@ -1589,6 +1625,33 @@ class TerminalManagerApp:
     def _notice(self, title: str, message: str, *, kind: str = "info") -> None:
         NoticeDialog(self.root, title=title, message=message, palette=PALETTE, kind=kind)
 
+    def _request_codex_scan(self) -> None:
+        if self._codex_thread and self._codex_thread.is_alive():
+            return
+        def scan():
+            self._codex_snapshot = codex_sessions.snapshot()
+        self._codex_thread = threading.Thread(target=scan, daemon=True, name="codex-session-scan")
+        self._codex_thread.start()
+
+    def link_codex_session(self) -> None:
+        selected = self.selected()
+        if not selected or not selected[1]:
+            self._notice("关联 Codex", "请先选择一条已登记记录。")
+            return
+        shell = selected[1]
+        entries = codex_sessions.sessions(shell.codex_home, shell.cwd)
+        if not entries:
+            self._notice("关联 Codex", "这个目录没有可用的 Codex 会话记录。")
+            return
+        dialog = CodexSessionDialog(self.root, entries, PALETTE)
+        if dialog.result:
+            entry = dialog.result
+            shell.codex_session_id = entry["id"]
+            shell.codex_cwd = entry["cwd"]
+            shell.codex_home = entry["home"]
+            save_shell(shell)
+            self.refresh()
+
     def _request_protection_scan(self, shells) -> None:
         if self._protection_thread and self._protection_thread.is_alive():
             return
@@ -1680,6 +1743,10 @@ class TerminalManagerApp:
         if self._recovery_active:
             self._notice("恢复清单", "已有恢复流程正在进行，请等待完成。")
             return
+        if entry.get("codex_session_id"):
+            # Manual recovery may target an already-restored directory-only
+            # window. A live exact session is still skipped by the launcher.
+            entry = {**entry, "window_id": ""}
         self._recovery_entries = [entry]
         self._recovery_index = self._recovery_restored_count = self._recovery_skipped_count = 0
         self._recovery_errors = []

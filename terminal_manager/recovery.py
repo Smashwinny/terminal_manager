@@ -19,7 +19,11 @@ def validate_recovery_directory(value: str) -> tuple[Path | None, str]:
     return directory, ""
 
 
-def recovery_command(directory: Path, token: str | None = None) -> list[str] | None:
+def recovery_command(directory: Path, token: str | None = None, *, codex_session_id: str = "", codex_cwd: str = "", codex_home: str = "") -> list[str] | None:
+    resume = None
+    if codex_session_id:
+        from .codex_sessions import resume_argv
+        resume = resume_argv(codex_session_id, codex_cwd or str(directory), codex_home)
     candidates = (
         ("gnome-terminal", ["gnome-terminal", "--window", f"--working-directory={directory}"]),
         ("kgx", ["kgx", "--working-directory", str(directory)]),
@@ -29,14 +33,21 @@ def recovery_command(directory: Path, token: str | None = None) -> list[str] | N
     )
     for executable, command in candidates:
         if shutil.which(executable):
+            if resume and executable != "gnome-terminal":
+                continue
             if token and executable == "gnome-terminal":
                 command.append(f"--role={token}")
+            if resume:
+                command.extend(["--", *resume])
             return command
     return None
 
 
-def launch_recovery_terminal(directory: Path, token: str | None = None) -> tuple[bool, str]:
-    command = recovery_command(directory, token)
+def launch_recovery_terminal(directory: Path, token: str | None = None, **session) -> tuple[bool, str]:
+    try:
+        command = recovery_command(directory, token, **session)
+    except ValueError as exc:
+        return False, str(exc)
     if command is None:
         return False, "没有找到支持按目录启动的终端程序"
     try:
