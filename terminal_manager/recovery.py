@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -62,3 +63,24 @@ def launch_recovery_terminal(directory: Path, token: str | None = None, **sessio
         return True, ""
     except OSError as exc:
         return False, f"启动终端失败：{exc}"
+
+
+def launch_tracked(entry: dict, token: str) -> tuple[bool, str]:
+    """The worker checks launcher exit; a terminal child reports its own exit."""
+    directory, error = validate_recovery_directory(entry['cwd'])
+    if error:
+        return False, error
+    try:
+        session = {k: entry.get(k, '') for k in ('codex_session_id', 'codex_cwd', 'codex_home')}
+        command = recovery_command(directory, token, **session)
+        if not command or command[0] != 'gnome-terminal':
+            return False, '可靠恢复目前需要 GNOME Terminal；记录已保留'
+        split = command.index('--') if '--' in command else len(command)
+        child = command[split + 1:] if split < len(command) else [os.environ.get('SHELL', '/bin/bash')]
+        argv = [*command[:split], '--', sys.executable, '-m', 'terminal_manager.recovery_child', token, '--', *child]
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+        if result.returncode:
+            return False, '终端启动失败：' + (result.stderr or result.stdout)[-1200:].strip()
+        return True, ''
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)

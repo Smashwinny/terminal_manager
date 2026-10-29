@@ -1,8 +1,10 @@
 from terminal_manager.tabs import TabGroup, TerminalTab, select_tab
 from unittest.mock import Mock, patch
 import subprocess
+from types import SimpleNamespace
 
 from terminal_manager.tabs import _worker, scan_tab_groups
+from terminal_manager.tabs import _find_role, _match_window
 from terminal_manager.model import WindowInfo
 
 
@@ -55,3 +57,48 @@ def test_tab_worker_returns_only_serializable_identity() -> None:
     with patch("terminal_manager.tabs._worker", return_value=True) as worker:
         assert select_tab(group, 1)
         assert worker.call_args.args[0]["select"] == "0x2a"
+
+
+def test_window_matching_reads_remote_title_once_for_many_candidates() -> None:
+    class Frame:
+        reads = 0
+
+        @property
+        def name(self):
+            self.reads += 1
+            return "target"
+
+        def queryComponent(self):
+            return SimpleNamespace(getExtents=lambda _: SimpleNamespace(x=0, y=0, width=800, height=600))
+
+    frame = Frame()
+    windows = [WindowInfo(hex(i), 0, 123, 0, 0, 800, 600, "gnome-terminal", "", f"other-{i}") for i in range(36)]
+    target = WindowInfo("0x99", 0, 123, 0, 0, 800, 600, "gnome-terminal", "", "target")
+    assert _match_window(frame, windows + [target], SimpleNamespace(DESKTOP_COORDS=0)) == target
+    assert frame.reads == 1
+
+
+def test_notebook_search_never_walks_menus_or_terminal_contents() -> None:
+    class Node:
+        def __init__(self, role, children=(), forbidden=False):
+            self.role, self.children, self.forbidden = role, children, forbidden
+
+        def getRole(self):
+            return self.role
+
+        def __iter__(self):
+            assert not self.forbidden, "Expensive unrelated accessibility tree was traversed"
+            return iter(self.children)
+
+    notebook = Node("notebook", forbidden=True)
+    frame = Node("frame", [Node("menu", forbidden=True), Node("terminal", forbidden=True), Node("filler", [Node("header", forbidden=True), notebook])])
+    assert _find_role(frame, "notebook", skip_roles={"menu", "terminal"}) is notebook
+    assert _find_role(Node("frame", [Node("menu", forbidden=True)]), "notebook", skip_roles={"menu"}) is None
+
+
+def test_scan_failure_is_not_an_empty_successful_inventory() -> None:
+    window = WindowInfo("0x2a", 0, 123, 0, 0, 800, 600, "gnome-terminal", "", "main")
+    with patch("terminal_manager.tabs._worker", return_value=None):
+        assert scan_tab_groups([window]) is None
+    with patch("terminal_manager.tabs._worker", return_value=[]):
+        assert scan_tab_groups([window]) == []

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+from . import codex_runtime
 
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 FIELDS = ("codex_session_id", "codex_cwd", "codex_home")
@@ -57,24 +58,19 @@ def resume_argv(session_id: str, directory: str, home: str = "") -> list[str]:
     path = Path(directory)
     if not path.is_absolute() or not path.is_dir():
         raise ValueError("Codex 会话目录不存在")
-    executable = shutil.which("codex")
-    if not executable:
-        local = Path.home() / ".local/bin/codex"
-        executable = str(local) if os.access(local, os.X_OK) else None
-    if not executable:
-        raise ValueError("未找到 Codex CLI")
+    executable = codex_runtime.command()
     root = Path(home or default_home())
     if not root.is_absolute() or not root.is_dir():
         raise ValueError("Codex 会话存储目录无效")
     # No prompt, --last, exec, shell command interpolation, or permission overrides.
-    return ["env", f"CODEX_HOME={root}", executable, "resume", session_id, "-C", str(path)]
+    return ["env", f"CODEX_HOME={root}", *executable, "resume", session_id, "-C", str(path)]
 
 
 def parse_cli(args: list[str]) -> tuple[bool, str]:
     if not args:
         return False, ""
     offset = 1
-    if Path(args[0]).name == "node" and len(args) > 1 and Path(args[1]).name == "codex":
+    if Path(args[0]).name == "node" and len(args) > 1 and Path(args[1]).name in {"codex", "codex.js"}:
         offset = 2
     elif Path(args[0]).name != "codex":
         return False, ""

@@ -96,10 +96,12 @@ def inspect_task(task_id: str) -> dict:
     return {**task, "pane_pid": int(fields[1]), "pane_tty": fields[3], "cwd": fields[4], "title": fields[5], "client_ttys": list(connected.values()), "views": views}
 
 
-def create_task(directory: str, name: str) -> str:
+def create_task(directory: str, name: str, *, memory_high: str = '') -> str:
     directory_path = Path(directory).resolve()
     if not directory_path.is_dir():
         raise ProtectionError("目录不存在")
+    if memory_high and not re.fullmatch(r'[1-9][0-9]*[MGT]', memory_high):
+        raise ProtectionError('内存软预算格式应为 2048M 或 4G；不会设置杀任务的硬上限')
     prefix = tmux_prefix()
     task_id = uuid.uuid4().hex
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "terminal-manager"
@@ -115,7 +117,8 @@ def create_task(directory: str, name: str) -> str:
     task = {"id": task_id, "name": name, "cwd": str(directory_path), "socket": str(socket), "unit": unit, "boot_id": boot_id(), "ended": False, "server_pid": 0}
     _atomic_private_json(task_path(task_id), task)
     try:
-        run(["systemd-run", "--user", f"--unit={unit}", "--property=Type=exec", "--property=Restart=no", "--property=KillMode=control-group", "--property=TimeoutStopSec=5s", *prefix, "-D", "-S", str(socket), "-f", str(config)])
+        budget = [f'--property=MemoryHigh={memory_high}'] if memory_high else []
+        run(["systemd-run", "--user", f"--unit={unit}", "--property=Type=exec", "--property=Restart=no", "--property=KillMode=control-group", "--property=TimeoutStopSec=5s", '--property=MemoryAccounting=yes', '--property=IOAccounting=yes', '--property=CPUWeight=50', *budget, *prefix, "-D", "-S", str(socket), "-f", str(config)])
         for _ in range(40):
             if socket.exists():
                 break
@@ -156,6 +159,7 @@ def main() -> None:
     new.add_argument("directory")
     new.add_argument("--name", default="保活任务")
     new.add_argument("--detached", action="store_true")
+    new.add_argument('--memory-high', default='', help='可选内存软预算，例如 4G；默认仅统计，不杀任务')
     for action in ("attach", "open", "end"):
         entry = sub.add_parser(action)
         entry.add_argument("id")
@@ -167,7 +171,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.action == "new":
-            task_id = create_task(args.directory, args.name)
+            task_id = create_task(args.directory, args.name, memory_high=args.memory_high)
             print(task_id, flush=True)
             if not args.detached:
                 open_task(task_id)

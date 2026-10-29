@@ -30,7 +30,7 @@ def test_metadata_is_read_only_and_uses_session_label(catalog):
 
 
 def test_resume_uses_exact_id_without_prompt_or_command_replay(tmp_path, catalog):
-    with patch('terminal_manager.codex_sessions.shutil.which', return_value='/safe/codex'):
+    with patch('terminal_manager.codex_runtime.command', return_value=['/safe/codex']):
         argv = cs.resume_argv(SID, str(tmp_path), str(tmp_path))
     assert argv == ['env', f'CODEX_HOME={tmp_path}', '/safe/codex', 'resume', SID, '-C', str(tmp_path)]
     assert '--last' not in argv and 'exec' not in argv
@@ -54,15 +54,17 @@ def test_gnome_codex_restore_has_role_and_structured_arguments(tmp_path):
     assert command[-5:] == ['--role=unique', '--', '/safe/codex', 'resume', SID]
 
 
-def test_live_session_is_not_opened_twice():
-    app = object.__new__(TerminalManagerApp)
-    app.root = Mock()
-    app._recovery_entries = [{'codex_session_id': SID}]
-    app._recovery_index = app._recovery_skipped_count = 0
-    with patch('terminal_manager.codex_sessions.is_live', return_value=True), patch('terminal_manager.app.launch_recovery_terminal') as launch:
-        app._restore_next_window()
+def test_live_session_is_not_opened_twice(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from terminal_manager import state_db
+    from terminal_manager.recovery_queue import RecoveryQueue
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
+    entry = {'shell_id':'s','name':'project','cwd':str(tmp_path),'window_id':'0x1','codex_session_id':SID,'codex_home':str(tmp_path)}
+    worker = RecoveryQueue(SimpleNamespace(reason=''))
+    with patch('terminal_manager.recovery_queue.list_windows', return_value=[]), patch('terminal_manager.codex_sessions.snapshot', return_value=([{'id':SID,'home':str(tmp_path)}],[])), patch('terminal_manager.recovery_queue.launch_tracked') as launch:
+        worker._one(entry)
     launch.assert_not_called()
-    assert app._recovery_index == 1 and app._recovery_skipped_count == 1
+    assert state_db.records()[0]['_state'] == 'awaiting'
 
 
 def test_persisted_tty_reuse_cannot_change_directory():

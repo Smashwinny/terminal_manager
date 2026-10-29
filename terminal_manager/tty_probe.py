@@ -49,17 +49,20 @@ def terminal_tty_cwds() -> dict[str, str]:
     return {tty: value[1] for tty, value in candidates.items()}
 
 
-def probe_visible_tty(window_id: str, *, settle_seconds: float = 0.045) -> str | None:
+def probe_visible_tty(window_id: str, *, settle_seconds: float = 0.045, cancelled=None, budget_seconds=2.0) -> str | None:
     """Learn which PTY is visible by applying and visually detecting a test colour."""
     if not _probe_tools_available():
         return None
     time.sleep(0.06)
+    deadline = time.monotonic() + budget_seconds
     for tty in terminal_ttys():
+        if time.monotonic() >= deadline or (cancelled and cancelled()):
+            return None
         try:
             if not write_tty_sequence(tty, PROBE_SEQUENCE):
                 continue
             time.sleep(settle_seconds)
-            if _window_has_probe_colour(window_id):
+            if not (cancelled and cancelled()) and _window_has_probe_colour(window_id):
                 return tty
         finally:
             write_tty_sequence(tty, RESET_SEQUENCE)
@@ -73,12 +76,15 @@ def _probe_tools_available() -> bool:
 
 
 def _window_has_probe_colour(window_id: str) -> bool:
-    with tempfile.NamedTemporaryFile(prefix="terminal-manager-", suffix=".xwd") as image:
+    from .state_db import root
+    temporary = root() / 'probe-tmp'
+    temporary.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(prefix="terminal-manager-", suffix=".xwd", dir=temporary) as image:
         capture = subprocess.run(
             ["xwd", "-silent", "-id", window_id, "-out", image.name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=2,
+            timeout=.5,
             check=False,
         )
         if capture.returncode != 0:
@@ -91,7 +97,7 @@ def _window_has_probe_colour(window_id: str) -> bool:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=3,
+            timeout=.5,
             check=False,
         )
     pixels = decoded.stdout

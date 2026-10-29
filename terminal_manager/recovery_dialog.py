@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
+from .recovery_queue import LABELS
 
 
 class RecoveryDialog:
@@ -13,16 +14,19 @@ class RecoveryDialog:
         ttk.Label(window, text="保活任务连接原进程；已关联 Codex 的记录打开原对话；其余只恢复目录。", style="Subtitle.TLabel").pack(padx=15, pady=12)
         frame = ttk.Frame(window)
         frame.pack(fill=tk.BOTH, expand=True, padx=15)
-        tree = ttk.Treeview(frame, columns=("name", "cwd", "mode"), show="headings", height=14)
+        tree = ttk.Treeview(frame, columns=("name", "cwd", "mode", "state"), show="headings", height=14)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        for column, label, width in (("name", "名称", 220), ("cwd", "工作目录", 370), ("mode", "恢复方式", 130)):
+        for column, label, width in (("name", "名称", 180), ("cwd", "工作目录", 300), ("mode", "恢复方式", 130), ("state", "状态", 180)):
             tree.heading(column, text=label)
             tree.column(column, width=width)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         for index, entry in enumerate(entries):
-            tree.insert("", tk.END, iid=str(index), values=(entry["name"], entry["cwd"], "连接原任务" if entry.get("protected_id") else "Codex 原对话" if entry.get("codex_session_id") else "仅打开目录"))
+            tree.insert("", tk.END, iid=str(index), values=(entry["name"], entry["cwd"], "连接原任务" if entry.get("protected_id") else "Codex 原对话" if entry.get("codex_session_id") else "仅打开目录", LABELS.get(entry.get('_state'), '未确认')))
+        detail = ttk.Label(window, text="选择记录可查看恢复失败原因。", wraplength=780)
+        detail.pack(padx=15, pady=8)
+        tree.bind('<<TreeviewSelect>>', lambda event: detail.configure(text=entries[int(tree.selection()[0])].get('_error') or '没有记录错误。') if tree.selection() else None)
         def restore(directory_only=False):
             selected = tree.selection()
             if selected:
@@ -34,6 +38,11 @@ class RecoveryDialog:
                     self.result.update(shell_id=self.result["shell_id"] + "-directory", window_id="", protected_id="")
                 window.destroy()
         ttk.Button(window, text="恢复选中项", command=restore).pack(pady=12)
+        def skip():
+            if tree.selection():
+                self.result = {**entries[int(tree.selection()[0])], '_action': 'skip'}
+                window.destroy()
+        ttk.Button(window, text="跳过自动恢复（保留记录）", command=skip).pack(pady=4)
         ttk.Button(window, text="仅打开目录（不恢复进程）", command=lambda: restore(True)).pack(pady=(0, 12))
         tree.bind("<Double-1>", lambda event: restore())
         window.wait_visibility()

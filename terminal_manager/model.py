@@ -77,6 +77,16 @@ STATUS_LABELS = {
     "static": "静态/空闲",
     "window": "未注册",
     "disconnected": "已断开 · 任务存活",
+    "pending": "待恢复",
+    "starting": "启动中",
+    "awaiting": "对话待确认",
+    "ready": "恢复已确认",
+    "failed": "恢复失败 · 可重试",
+    "paused": "恢复已暂停",
+    "skipped": "已跳过恢复",
+    "missing": "窗口未连接",
+    "available": "未自动恢复",
+    "observed": "已连接",
 }
 
 

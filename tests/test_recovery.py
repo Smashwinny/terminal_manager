@@ -82,72 +82,35 @@ def test_gnome_recovery_opens_a_new_window_in_saved_directory(tmp_path) -> None:
         ]
 
 
-def test_existing_registered_window_is_not_launched_twice() -> None:
-    app = object.__new__(TerminalManagerApp)
-    app.root = Root()
-    app._recovery_entries = [{"shell_id": "abc", "name": "项目", "cwd": "/work", "window_id": "0x00000001"}]
-    app._recovery_index = 0
-    app._recovery_errors = []
-    app._recovery_skipped_count = 0
-    app.windows = [window("0x00000001")]
-
-    with patch("terminal_manager.app.launch_recovery_terminal") as launch:
-        app._restore_next_window()
-
+def test_existing_registered_window_is_not_launched_twice(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from terminal_manager import state_db
+    from terminal_manager.recovery_queue import RecoveryQueue
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
+    entry = {'shell_id':'abc','name':'project','cwd':str(tmp_path),'window_id':'0x00000001','window_pid':100,'_boot':state_db.boot_id()}
+    worker = RecoveryQueue(SimpleNamespace(reason=''))
+    with patch('terminal_manager.recovery_queue.list_windows', return_value=[window('0x00000001')]), patch('terminal_manager.recovery_queue.launch_tracked') as launch:
+        worker._one(entry)
     launch.assert_not_called()
-    assert app._recovery_index == 1
-    assert app._recovery_skipped_count == 1
-    assert len(app.root.callbacks) == 1
+    assert state_db.records()[0]['_state'] == 'ready'
 
 
-def test_detected_recovery_window_rebinds_original_record(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    shell = ShellInfo(
-        "abc", "0x00000001", 0, "", "项目", "unbound", "", "", str(tmp_path),
-        None, "", 1.0, 1.0,
-    )
-    save_shell(shell)
-    app = object.__new__(TerminalManagerApp)
-    app.root = Root()
-    app._recovery_entries = [{"shell_id": "abc", "name": "项目", "cwd": str(tmp_path), "window_id": "0x00000001"}]
-    app._recovery_index = 0
-    app._recovery_before_ids = {"0x00000001"}
-    app._recovery_poll_count = 0
-    app._recovery_restored_count = 0
-    app.refresh = lambda: None
-
-    with patch("terminal_manager.app.list_windows", return_value=[window("0x00000002")]):
-        app._poll_recovered_window()
-
+def test_detected_recovery_window_rebinds_original_record(tmp_path, monkeypatch):
+    from terminal_manager.recovery_queue import bind
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
+    save_shell(ShellInfo('abc','0x00000001',999,'/dev/pts/999','project','unbound','','',str(tmp_path),None,'',1,1))
+    entry = {'shell_id':'abc','name':'project','cwd':str(tmp_path),'window_id':'0x00000001'}
+    bind(entry, window('0x00000002'))
     restored = load_shells()[0]
-    assert restored.window_id == "0x00000002"
-    assert restored.name == "项目"
-    assert restored.cwd == str(tmp_path)
-    assert app._recovery_index == 1
-    assert app._recovery_restored_count == 1
+    assert restored.window_id == '0x00000002' and restored.name == 'project'
+    assert restored.shell_pid == 0 and restored.tty == ''
 
 
-def test_missing_record_is_rebuilt_from_recovery_snapshot(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    app = object.__new__(TerminalManagerApp)
-    app.root = Root()
-    app._recovery_entries = [{
-        "shell_id": "rebuilt",
-        "name": "重建项目",
-        "cwd": str(tmp_path),
-        "window_id": "0x00000001",
-    }]
-    app._recovery_index = 0
-    app._recovery_before_ids = {"0x00000001"}
-    app._recovery_poll_count = 0
-    app._recovery_restored_count = 0
-    app.refresh = lambda: None
-
-    with patch("terminal_manager.app.list_windows", return_value=[window("0x00000003")]):
-        app._poll_recovered_window()
-
+def test_missing_record_is_rebuilt_from_recovery_snapshot(tmp_path, monkeypatch):
+    from terminal_manager.recovery_queue import bind
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
+    entry = {'shell_id':'rebuilt','name':'project','cwd':str(tmp_path),'window_id':'0x00000001'}
+    bind(entry, window('0x00000003'))
     rebuilt = load_shells()[0]
-    assert rebuilt.shell_id == "rebuilt"
-    assert rebuilt.window_id == "0x00000003"
-    assert rebuilt.name == "重建项目"
+    assert rebuilt.shell_id == 'rebuilt' and rebuilt.window_id == '0x00000003'
     assert rebuilt.cwd == str(tmp_path)

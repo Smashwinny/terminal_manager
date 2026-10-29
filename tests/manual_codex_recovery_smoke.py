@@ -34,12 +34,14 @@ def main():
     fake = out / 'codex'
     receipt = out / 'argv.json'
     receipt.unlink(missing_ok=True)
-    fake.write_text('#!/usr/bin/python3\nimport os,json,sys,time\nfrom pathlib import Path\n'+f'Path({str(receipt)!r}).write_text(json.dumps({{"argv":sys.argv[1:],"cwd":os.getcwd(),"home":os.environ.get("CODEX_HOME"),"pid":os.getpid()}}))\n'+'print("Isolated resume recording stub",flush=True)\ntime.sleep(45)\n')
+    fake.write_text('#!/usr/bin/python3\nimport os,json,sys,time\nfrom pathlib import Path\nif "--version" in sys.argv: print("isolated stub"); sys.exit(0)\n'+f'Path({str(receipt)!r}).write_text(json.dumps({{"argv":sys.argv[1:],"cwd":os.getcwd(),"home":os.environ.get("CODEX_HOME"),"pid":os.getpid()}}))\n'+'print("Isolated resume recording stub",flush=True)\ntime.sleep(45)\n')
     fake.chmod(0o700)
     os.environ['PATH'] = str(out) + os.pathsep + os.environ['PATH']
     entries = [{'shell_id':'codex-smoke','window_id':'0x00000001','name':'恢复测试','cwd':str(out),'codex_session_id':sid,'codex_cwd':str(out),'codex_home':str(home)}]
     save_shell(ShellInfo('codex-smoke','0x00000001',999999,'/dev/pts/9999','恢复测试','ended','','',str(out),None,'',0,0))
     save_runtime_session(clean_shutdown=False,entries=entries)
+    from terminal_manager import state_db
+    state_db.mark(entries[0], 'pending')
     tools = ROOT/'tmp/protection-tools/extracted/usr'
     os.environ['XDG_DATA_DIRS'] = str(tools/'share')+':/usr/local/share:/usr/share'
     wm_log = (out/'openbox.log').open('w')
@@ -56,6 +58,7 @@ def main():
         time.sleep(.6)
         root = tk.Tk(className='TerminalManagerCodexSmoke')
         app = TerminalManagerApp(root)
+        app.recovery_queue.timeout = 2
         deadline = time.monotonic()+15
         while time.monotonic()<deadline:
             root.update()
@@ -74,7 +77,8 @@ def main():
         assert observed['home']==str(home)
         assert saved.codex_session_id==sid
         assert saved.tty=='' and saved.shell_pid==0
-        assert app._recovery_restored_count==1
+        # The stub cannot prove a real conversation loaded: never call it ready.
+        assert state_db.records()[0]['_state']=='awaiting'
         root.update()
         subprocess.run(['xwd','-silent','-id',str(root.winfo_id()),'-out',str(out/'manager.xwd')],check=True,timeout=5)
         subprocess.run(['ffmpeg','-y','-v','error','-i',str(out/'manager.xwd'),str(out/'manager.png')],check=True,timeout=5)

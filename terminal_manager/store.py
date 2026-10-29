@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .model import ShellInfo
+from . import state_db
 
 
 TTY_BINDINGS_VERSION = 2
@@ -43,7 +44,7 @@ def _atomic_private_json(target: Path, payload: object) -> None:
         target.parent.chmod(0o700)
     except OSError:
         pass
-    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary = target.with_suffix(target.suffix + '.' + uuid.uuid4().hex + ".tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(temporary, flags, 0o600)
     try:
@@ -95,6 +96,8 @@ def save_runtime_session(*, clean_shutdown: bool, entries: list[dict[str, str]])
     # known inventory independently of the clean-shutdown flag.
     if clean_shutdown and not entries:
         entries = previous["entries"]
+    if previous == {"clean_shutdown": clean_shutdown, "entries": entries} and runtime_session_path().exists():
+        return
     if previous["entries"] and previous["entries"] != entries:
         history = state_dir().parent / "session-history"
         lost = {e["shell_id"] for e in previous["entries"]} - {e["shell_id"] for e in entries}
@@ -133,7 +136,9 @@ def recovery_candidates() -> list[dict]:
         result.setdefault(shell.shell_id, {"shell_id": shell.shell_id, "window_id": shell.window_id, "name": shell.name, "cwd": shell.cwd, "protected_id": shell.protected_id, "codex_session_id": shell.codex_session_id, "codex_cwd": shell.codex_cwd, "codex_home": shell.codex_home})
         if shell.codex_session_id:
             result[shell.shell_id].update(codex_session_id=shell.codex_session_id, codex_cwd=shell.codex_cwd, codex_home=shell.codex_home)
-    return list(result.values())
+    durable = {r['shell_id']: r for r in state_db.records()}
+    # The durable inventory owns deletion/skip decisions after migration.
+    return [{**entry, **durable[sid]} for sid, entry in result.items() if sid in durable] + [r for sid, r in durable.items() if sid not in result]
 
 
 def prune_tty_bindings(window_ids: set[str]) -> None:
@@ -244,26 +249,24 @@ def save_shell(info: ShellInfo) -> None:
     directory = state_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = shell_path(info.shell_id)
-    _atomic_private_json(target, asdict(info))
+    state_db.save_shell(info)
+    # A human-readable compatibility export, never the recovery authority.
+    try:
+        unchanged = json.loads(target.read_text()) == asdict(info)
+    except (OSError, ValueError):
+        unchanged = False
+    if not unchanged:
+        _atomic_private_json(target, asdict(info))
 
 
 def load_shells() -> list[ShellInfo]:
-    directory = state_dir()
-    if not directory.exists():
-        return []
-    shells: list[ShellInfo] = []
-    for path in directory.glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            shells.append(ShellInfo(**data))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            continue
-    return shells
+    return state_db.shells()
 
 
 def remove_shell(shell_id: str) -> bool:
+    removed = state_db.remove(shell_id)
     try:
         shell_path(shell_id).unlink()
         return True
     except FileNotFoundError:
-        return False
+        return removed

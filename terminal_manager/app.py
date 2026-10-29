@@ -7,6 +7,7 @@ import uuid
 import os
 import sys
 import shutil
+import queue
 from pathlib import Path
 from tkinter import ttk, filedialog
 from dataclasses import replace
@@ -15,12 +16,15 @@ from logging.handlers import RotatingFileHandler
 from tkinter import font as tkfont
 
 from . import __version__
-from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker
+from .activity import CLAUDE_WORKING_PREFIXES, CODEX_SPINNER_PREFIXES, ActivityState, WindowActivityTracker, split_status_prefix
 from .dialogs import ConfirmationDialog, NoticeDialog, RegistrationDialog, SignalLearningDialog, SignalManagementDialog
 from .highlight import WindowHighlighter, can_highlight_tty
 from .model import STATUS_LABELS, ShellInfo, WindowInfo
 from .pointer import PointerPressMonitor
-from . import protected, codex_sessions
+from . import protected, codex_sessions, state_db
+from .recovery_queue import RecoveryQueue, LABELS as RECOVERY_LABELS
+from .resources import ResourceMonitor
+from .persistence import InventoryWriter
 from .recovery_dialog import RecoveryDialog, CodexSessionDialog
 from .single_instance import DETACHED_CHILD_ENV, SingleInstance, activate_existing, launch_detached
 from .recovery import launch_recovery_terminal, validate_recovery_directory
@@ -42,6 +46,7 @@ from .store import (
     state_dir,
 )
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
+from .scan_budget import ScanBudget
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty, terminal_tty_cwds
 from .x11 import (
@@ -130,6 +135,7 @@ class TerminalManagerApp:
         self._protection_thread = None
         self._codex_thread = None
         self._codex_snapshot = ([], [])
+        self._codex_scan_budget = ScanBudget()
         self._window_roles: dict[str, str] = {}
         learned_protocol = load_learned_protocol()
         tracker_options = {
@@ -150,6 +156,8 @@ class TerminalManagerApp:
         self.tab_items: dict[str, tuple[TabGroup, int]] = {}
         self._tab_scan_result: list[TabGroup] | None = None
         self._tab_scan_thread: threading.Thread | None = None
+        self._tab_scan_budget = ScanBudget()
+        self._tab_scan_requested = False
         self._tab_group_misses: dict[str, int] = {}
         self.expanded_window_ids: set[str] = set()
         self._last_layout_rows: int | None = 0 if saved_window_size else None
@@ -170,8 +178,21 @@ class TerminalManagerApp:
         self._pinned_was_above = False
         self.search_var = tk.StringVar()
         self.thermal_enabled = tk.BooleanVar(value=True)
+        self._closed = False
+        self._probe_thread = None
+        self._probe_generation = 0
+        self._probe_results = queue.SimpleQueue()
+        self._probe_backoff = {}
+        self._probe_pending = None
+        self.resources = ResourceMonitor()
+        self.inventory_writer = InventoryWriter()
+        self.recovery_queue = RecoveryQueue(self.resources)
         previous_session = load_runtime_session()
-        self._recovery_entries = list(previous_session["entries"]) if not previous_session["clean_shutdown"] else []
+        self._recovery_entries = state_db.pending()
+        if not previous_session['clean_shutdown']:
+            queued = {r['shell_id'] for r in self._recovery_entries}
+            self._recovery_entries.extend(r for r in state_db.records()
+                                          if r['shell_id'] not in queued and r['_state'] in ('observed', 'ready', 'awaiting'))
         self._recovery_index = 0
         self._recovery_before_ids: set[str] = set()
         self._recovery_poll_count = 0
@@ -180,7 +201,7 @@ class TerminalManagerApp:
         self._recovery_skipped_count = 0
         self._recovery_active = bool(self._recovery_entries)
         # Preserve the previous crash snapshot until recovery has completed.
-        save_runtime_session(clean_shutdown=False, entries=list(previous_session["entries"]))
+        # Durable inventory is authoritative; a failed launch never leaves it.
         self.search_var.trace_add("write", lambda *_args: self.refresh())
         self._build_ui()
         self._capture_scalable_layout()
@@ -192,10 +213,17 @@ class TerminalManagerApp:
         self.root.bind("<Configure>", self._schedule_responsive_scale, add="+")
         self.refresh()
         self._poll_active_window()
+        self._background_job = self.root.after(100, self._poll_background)
         if self._recovery_active:
             self.root.after(350, self._restore_next_window)
 
     def _close(self) -> None:
+        self._closed = True
+        self._probe_generation += 1
+        self.recovery_queue.close()
+        self.resources.close()
+        flushed = self.inventory_writer.close()
+        self.root.after_cancel(self._background_job)
         if self.refresh_job is not None:
             self.root.after_cancel(self.refresh_job)
             self.refresh_job = None
@@ -216,7 +244,9 @@ class TerminalManagerApp:
         self.window_highlighter.hide()
         self.pointer_monitor.close()
         self._release_managed_pin()
-        save_runtime_session(clean_shutdown=True, entries=[])
+        if flushed:
+            save_runtime_session(clean_shutdown=True, entries=[])
+        state_db.backup()
         self.root.destroy()
 
     def _build_ui(self) -> None:
@@ -274,11 +304,14 @@ class TerminalManagerApp:
         menu.add_command(label="结束选中保活任务…", command=self.end_protected_task)
         menu.add_separator()
         menu.add_command(label="恢复清单…", command=self.show_recovery)
+        menu.add_command(label="暂停自动恢复", command=self.pause_recovery)
+        menu.add_command(label="重试失败／继续恢复", command=self.retry_recovery)
+        menu.add_command(label="资源状态…", command=self.show_resources)
         menu.add_separator()
         menu.add_command(label="关联 Codex 会话…", command=self.link_codex_session)
         protection_menu.configure(menu=menu)
         protection_menu.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh).pack(side=tk.LEFT)
+        ttk.Button(header_actions, text="↻  刷新", style="Accent.TButton", command=self.refresh_now).pack(side=tk.LEFT)
 
         dashboard = ttk.Frame(container, style="App.TFrame")
         dashboard.pack(fill=tk.X, pady=(0, 16))
@@ -571,6 +604,10 @@ class TerminalManagerApp:
             width=8,
         )
 
+    def refresh_now(self) -> None:
+        self._tab_scan_requested = True
+        self.refresh()
+
     def refresh(self) -> None:
         if self.refresh_job is not None:
             self.root.after_cancel(self.refresh_job)
@@ -631,12 +668,17 @@ class TerminalManagerApp:
         tty_cwds = terminal_tty_cwds()
         live_session_entries: list[dict[str, str]] = []
 
-        self.tree.delete(*self.tree.get_children())
+        self._old_tree_ids = set(self.tree.get_children())
         self.items.clear()
         self.tab_items.clear()
         query = self.search_var.get().strip().lower()
         row_index = 0
-        records_by_window = {info.window_id: info for info in shells}
+        recovery_status = {r['shell_id']: r for r in state_db.records()}
+        current_boot = state_db.boot_id()
+        window_pids = {w.window_id: w.pid for w in self.windows}
+        records_by_window = {info.window_id: info for info in shells
+                             if recovery_status.get(info.shell_id, {}).get('_boot') == current_boot
+                             and recovery_status.get(info.shell_id, {}).get('window_pid', window_pids.get(info.window_id)) == window_pids.get(info.window_id)}
         used_record_ids: set[str] = set()
         rows: list[tuple[ShellInfo | None, WindowInfo | None, ActivityState | None, str, str]] = []
         for window in self.windows:
@@ -650,7 +692,7 @@ class TerminalManagerApp:
         for info in shells:
             if info.shell_id not in used_record_ids:
                 protected_state = self.protected_states.get(info.protected_id, {})
-                status = "disconnected" if protected_state and not protected_state.get("error") else "unknown" if info.protected_id else "ended"
+                status = "disconnected" if protected_state and not protected_state.get("error") else recovery_status.get(info.shell_id, {}).get('_state', 'missing')
                 rows.append((info, None, self.protected_activities.get(info.protected_id), status, info.name))
 
         # Persist every live registered window independently of search/filter
@@ -694,6 +736,7 @@ class TerminalManagerApp:
                 "name": info.name,
                 "cwd": cwd,
                 "window_id": window.window_id,
+                "window_pid": window.pid,
                 "protected_id": info.protected_id,
                 **{key: getattr(info, key) for key in codex_sessions.FIELDS},
             })
@@ -753,7 +796,7 @@ class TerminalManagerApp:
             cwd = self._directory_for(info, window, tab_key, tty_cwds)
             self.items[iid] = (info, window)
             registered_prefix = "" if info else "未登记 · "
-            self.tree.insert(
+            self._upsert_tree(
                 "",
                 tk.END,
                 iid=iid,
@@ -786,7 +829,7 @@ class TerminalManagerApp:
                     child_cwd = self._directory_for(info, window, f"tab:{tab.index}", tty_cwds)
                     self.items[child_id] = (info, window)
                     self.tab_items[child_id] = (group, tab.index)
-                    self.tree.insert(
+                    self._upsert_tree(
                         "",
                         tk.END,
                         iid=child_id,
@@ -810,6 +853,8 @@ class TerminalManagerApp:
                         ),
                     )
 
+        for stale in self._old_tree_ids - self.items.keys():
+            self.tree.delete(stale)
         registered_window_ids = {info.window_id for info in shells}
         unregistered = sum(1 for window in self.windows if window.window_id not in registered_window_ids)
         total = len(rows)
@@ -837,125 +882,101 @@ class TerminalManagerApp:
             self._sync_selected_style()
         self.update_details()
         self._adapt_window_height()
-        if scan_ok and not self._recovery_active:
-            save_runtime_session(clean_shutdown=False, entries=live_session_entries)
+        if scan_ok:
+            self.inventory_writer.submit(live_session_entries)
+
+    def _upsert_tree(self, parent, index, *, iid, **options):
+        if self.tree.exists(iid):
+            current = self.tree.item(iid)
+            changed = {k: v for k, v in options.items() if tuple(current.get(k, ())) != tuple(v) if k in ('values', 'tags')}
+            if changed:
+                self.tree.item(iid, **changed)
+            position = len(self.items) - 1
+            if self.tree.index(iid) != position:
+                self.tree.move(iid, parent, position)
+        else:
+            self.tree.insert(parent, index, iid=iid, **options)
 
     def _restore_next_window(self) -> None:
-        if self._recovery_index >= len(self._recovery_entries):
-            self._finish_recovery()
-            return
-        entry = self._recovery_entries[self._recovery_index]
-        if entry.get("protected_id"):
-            # Protected sessions survive the manager. Reconnection is explicit;
-            # an old boot/session must never fall back to launching a new task.
-            self._recovery_index += 1
-            self.root.after(0, self._restore_next_window)
-            return
-        sid = entry.get("codex_session_id", "")
-        if sid and codex_sessions.is_live(sid, entry.get("codex_home", "")):
-            self._recovery_skipped_count += 1
-            self._recovery_index += 1
-            self.root.after(0, self._restore_next_window)
-            return
-        live_ids = {window.window_id for window in self.windows}
-        if entry["window_id"] in live_ids:
-            self._recovery_skipped_count += 1
-            self._recovery_index += 1
-            self.root.after(0, self._restore_next_window)
-            return
-        directory, reason = validate_recovery_directory(entry["cwd"])
-        if directory is None:
-            self._record_recovery_error(entry, reason)
-            self._recovery_index += 1
-            self.root.after(0, self._restore_next_window)
-            return
-        self._recovery_before_ids = live_ids
-        self._recovery_token = f"tm-recover-{uuid.uuid4().hex}" if shutil.which("gnome-terminal") else None
-        session = {key: entry.get(key, "") for key in codex_sessions.FIELDS} if sid else {}
-        started, reason = launch_recovery_terminal(directory, self._recovery_token, **session)
-        if not started:
-            self._record_recovery_error(entry, reason)
-            self._recovery_index += 1
-            self.root.after(0, self._restore_next_window)
-            return
-        self._recovery_poll_count = 0
-        self.root.after(250, self._poll_recovered_window)
+        self.recovery_queue.start(self._recovery_entries)
 
-    def _poll_recovered_window(self) -> None:
-        entry = self._recovery_entries[self._recovery_index]
-        try:
-            windows = list_windows()
-        except X11Error:
-            windows = []
-        candidates = [window for window in windows if window.window_id not in self._recovery_before_ids]
-        token = getattr(self, "_recovery_token", None)
-        if token:
-            candidates = [window for window in candidates if window_role(window.window_id) == token]
-        elif len(candidates) != 1:
-            candidates = []
-        if candidates:
-            window = candidates[0]
-            shell = next((item for item in load_shells() if item.shell_id == entry["shell_id"]), None)
-            now = time.time()
-            if shell is None:
-                shell = ShellInfo(
-                    shell_id=entry["shell_id"],
-                    window_id=window.window_id,
-                    shell_pid=0,
-                    tty="",
-                    name=entry["name"],
-                    status="unbound",
-                    status_detail="异常退出后已从恢复快照重建登记",
-                    command="",
-                    cwd=entry["cwd"],
-                    foreground_pid=None,
-                    process_state="",
-                    registered_at=now,
-                    last_seen=now,
-                )
-            else:
-                shell.window_id = window.window_id
-                shell.cwd = entry["cwd"]
-                shell.status = "unbound"
-                shell.status_detail = "异常退出后已按保存目录恢复"
-                shell.last_seen = now
-            # Old PTY numbers and PIDs may now identify an unrelated terminal.
-            shell.tty = ""
-            shell.shell_pid = 0
-            shell.foreground_pid = None
-            shell.command = ""
-            for key in codex_sessions.FIELDS:
-                setattr(shell, key, entry.get(key, ""))
-            save_shell(shell)
-            self._recovery_restored_count += 1
-            self._recovery_index += 1
+    def pause_recovery(self) -> None:
+        self.recovery_queue.paused.set()
+        self.details.configure(text="已请求暂停：当前启动完成后暂停后续项目，运行中的任务不受影响。")
+
+    def retry_recovery(self) -> None:
+        if self.recovery_queue.active:
+            self.details.configure(text="恢复仍在进行；可先暂停，再继续。")
+            return
+        entries = [r for r in state_db.records() if r['_state'] in ('pending', 'failed', 'paused', 'starting', 'awaiting')]
+        for entry in entries:
+            state_db.mark(entry, 'pending')
+        self._recovery_entries = entries
+        self.recovery_queue.start(entries)
+
+    def show_resources(self) -> None:
+        sample = self.resources.sample
+        available = sample.get('available', 0) / 1024**3
+        swap = sample.get('swap_used', 0) / 1024**3
+        self._notice("资源状态", f"可用内存 {available:.1f} GiB；已用交换空间 {swap:.1f} GiB\n"
+                     f"内存等待 {sample.get('memory_some', 0):.1f}%；I/O 全阻塞 {sample.get('io_full', 0):.1f}%\n"
+                     + (self.resources.reason or "资源压力正常") + "\n只暂停新的恢复和重扫描，不停止现有任务。")
+
+    def _poll_background(self) -> None:
+        if self._closed:
+            return
+        refresh = False
+        while not self.recovery_queue.events.empty():
+            kind, value = self.recovery_queue.events.get()
+            if kind == 'bound' and value[1]:
+                self._remember_tty(value[0], 'main', value[1])
+            refresh = True
+        while not self._probe_results.empty():
+            generation, window_id, tab_key, tty = self._probe_results.get()
+            if generation != self._probe_generation:
+                continue
+            if tty and any(w.window_id == window_id for w in self.windows):
+                self._remember_tty(window_id, tab_key, tty)
+                try:
+                    if active_window_id() == window_id:
+                        self.window_highlighter.flash(tty)
+                except X11Error:
+                    pass
+            elif not tty:
+                self._probe_backoff[(window_id, tab_key)] = time.monotonic() + 10
+        if self._probe_pending and (not self._probe_thread or not self._probe_thread.is_alive()):
+            self._probe_async(*self._probe_pending)
+        self._recovery_active = self.recovery_queue.active
+        if refresh:
             self.refresh()
-            self.root.after(0, self._restore_next_window)
-            return
-        self._recovery_poll_count += 1
-        if self._recovery_poll_count < 24:
-            self.root.after(250, self._poll_recovered_window)
-            return
-        self._record_recovery_error(entry, "终端已启动，但未能在 6 秒内识别新窗口")
-        self._recovery_index += 1
-        self.root.after(0, self._restore_next_window)
+            self.details.configure(text=self.recovery_queue.message)
+        if self.inventory_writer.error:
+            self.details.configure(text=self.inventory_writer.error)
+        elif self.recovery_queue.active and self.resources.reason:
+            self.details.configure(text=self.recovery_queue.message)
+        self._background_job = self.root.after(100, self._poll_background)
 
-    def _record_recovery_error(self, entry: dict[str, str], reason: str) -> None:
-        message = f"恢复“{entry['name']}”失败：{reason}"
-        self._recovery_errors.append(message)
-        print(message, file=sys.stderr, flush=True)
-
-    def _finish_recovery(self) -> None:
-        self._recovery_active = False
-        self.refresh()
-        if self._recovery_errors:
-            summary = f"已恢复 {self._recovery_restored_count} 个，跳过已存在 {self._recovery_skipped_count} 个。"
-            self.details.configure(text=summary + "\n" + "；".join(self._recovery_errors))
-        elif self._recovery_entries:
-            self.details.configure(
-                text=f"已恢复 {self._recovery_restored_count} 个异常结束前登记窗口，"
-                f"跳过已存在 {self._recovery_skipped_count} 个。"
-            )
+    def _probe_async(self, window_id, tab_key):
+        self._probe_generation += 1
+        generation = self._probe_generation
+        if self._probe_thread and self._probe_thread.is_alive():
+            self._probe_pending = (window_id, tab_key)
+            return
+        self._probe_pending = None
+        if self._probe_backoff.get((window_id, tab_key), 0) > time.monotonic():
+            return
+        def cancelled():
+            return self._closed or generation != self._probe_generation or active_window_id() != window_id
+        def worker():
+            tty = ''
+            try:
+                tty = probe_visible_tty(window_id, cancelled=cancelled) or ''
+            except Exception:
+                pass
+            finally:
+                self._probe_results.put((generation, window_id, tab_key, tty))
+        self._probe_thread = threading.Thread(target=worker, daemon=True, name='tty-probe')
+        self._probe_thread.start()
 
     def _poll_active_window(self) -> None:
         """Track focus cheaply so reverse highlighting is independent of full refreshes."""
@@ -1307,6 +1328,7 @@ class TerminalManagerApp:
             group, tab_index = tab_target
             if not select_tab(group, tab_index):
                 self._tab_scan_result = None
+                self._tab_scan_requested = True
                 self._request_tab_scan()
                 self.details.configure(text="标签列表刚刚发生变化，正在后台刷新；请再点击一次。")
                 return
@@ -1351,9 +1373,8 @@ class TerminalManagerApp:
         if not tty:
             self.details.configure(text="首次识别该标签，正在建立高亮关联…")
             self.root.update_idletasks()
-            tty = probe_visible_tty(window_id) or ""
-            if tty:
-                self._remember_tty(window_id, tab_key, tty)
+            self._probe_async(window_id, tab_key)
+            return
         if tty:
             self.window_highlighter.flash(tty)
         else:
@@ -1434,12 +1455,30 @@ class TerminalManagerApp:
             self._tab_scan_result = None
 
     def _request_tab_scan(self) -> None:
+        if self.resources.reason or self.recovery_queue.active:
+            return
         if self._tab_scan_thread and self._tab_scan_thread.is_alive():
             return
         windows = list(self.windows)
+        # Ignore animated titles and geometry: those change continuously even
+        # when no tabs/windows are created. New window identities can scan sooner.
+        signature = (
+            frozenset((w.window_id, w.pid) for w in windows),
+            # A changed title body in an existing multi-tab window can mean
+            # the user switched tabs. Refresh its selection promptly, while
+            # spinner-only changes still use the ordinary slow scan period.
+            frozenset((w.window_id, split_status_prefix(w.title)[1])
+                      for w in windows if w.window_id in self.tab_groups),
+        )
+        if not self._tab_scan_budget.start(signature, force=self._tab_scan_requested):
+            return
+        self._tab_scan_requested = False
 
         def scan() -> None:
-            self._tab_scan_result = scan_tab_groups(windows)
+            try:
+                self._tab_scan_result = scan_tab_groups(windows)
+            finally:
+                self._tab_scan_budget.finish()
 
         self._tab_scan_thread = threading.Thread(target=scan, daemon=True, name="terminal-tab-scan")
         self._tab_scan_thread.start()
@@ -1462,6 +1501,12 @@ class TerminalManagerApp:
             text = "暂时无法取得该窗口的画面活动；窗口可能已经关闭。"
         if not window:
             text += "\n当前窗口 ID 已不存在；Shell 可能结束或窗口已经关闭。"
+        if shell:
+            entry = next((r for r in state_db.records() if r['shell_id'] == shell.shell_id), None)
+            if entry:
+                text += '\n恢复状态：' + RECOVERY_LABELS.get(entry['_state'], entry['_state'])
+                if entry['_error']:
+                    text += '\n' + entry['_error']
         if shell and shell.protected_id:
             state = self.protected_states.get(shell.protected_id, {})
             if state.get("error"):
@@ -1626,10 +1671,27 @@ class TerminalManagerApp:
         NoticeDialog(self.root, title=title, message=message, palette=PALETTE, kind=kind)
 
     def _request_codex_scan(self) -> None:
+        if self.resources.reason:
+            return
         if self._codex_thread and self._codex_thread.is_alive():
             return
+        if not self._codex_scan_budget.start():
+            return
         def scan():
-            self._codex_snapshot = codex_sessions.snapshot()
+            try:
+                self._codex_snapshot = codex_sessions.snapshot()
+                # Confirm delayed startup using current process/TTY/title evidence.
+                for entry in state_db.records():
+                    if entry['_state'] != 'awaiting' or not entry.get('codex_session_id'):
+                        continue
+                    for window in list(self.windows):
+                        found = codex_sessions.detect(window.title, entry['cwd'], '', *self._codex_snapshot)
+                        if found.get('codex_session_id') == entry['codex_session_id']:
+                            from .recovery_queue import bind
+                            state_db.mark(bind(entry, window), 'ready')
+                            break
+            finally:
+                self._codex_scan_budget.finish()
         self._codex_thread = threading.Thread(target=scan, daemon=True, name="codex-session-scan")
         self._codex_thread.start()
 
@@ -1656,6 +1718,9 @@ class TerminalManagerApp:
         if self._protection_thread and self._protection_thread.is_alive():
             return
         ids = [s.protected_id for s in shells if s.protected_id]
+        if not ids:
+            self.protected_states = {}
+            return
         def scan():
             states = {}
             for task_id in ids:
@@ -1734,6 +1799,11 @@ class TerminalManagerApp:
         if not dialog.result:
             return
         entry = dialog.result
+        action = entry.pop('_action', 'restore')
+        if action == 'skip':
+            state_db.mark(entry, 'skipped', '用户跳过自动恢复；记录保留')
+            self.refresh()
+            return
         if entry.get("protected_id"):
             try:
                 protected.open_task(entry["protected_id"])
@@ -1751,6 +1821,7 @@ class TerminalManagerApp:
         self._recovery_index = self._recovery_restored_count = self._recovery_skipped_count = 0
         self._recovery_errors = []
         self._recovery_active = True
+        state_db.mark(entry, 'pending')
         self._restore_next_window()
 
 def status_text(status: str) -> str:

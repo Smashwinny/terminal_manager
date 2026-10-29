@@ -79,17 +79,14 @@ def test_reused_xid_does_not_bind_old_protected_record(tmp_path, monkeypatch):
 
 
 def test_recovery_role_ignores_unrelated_concurrent_window(tmp_path, monkeypatch):
-    from terminal_manager.app import TerminalManagerApp
     from terminal_manager.model import WindowInfo
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    app = object.__new__(TerminalManagerApp)
-    app.root = Mock()
-    app.refresh = Mock()
-    app._recovery_entries = [entry(1)]
-    app._recovery_index = app._recovery_restored_count = app._recovery_poll_count = 0
-    app._recovery_before_ids = set()
-    app._recovery_token = "unique-token"
-    windows = [WindowInfo(wid, 0, 123, 0, 0, 800, 600, "gnome-terminal", "", "task") for wid in ("0x2", "0x3")]
-    with patch("terminal_manager.app.list_windows", return_value=windows), patch("terminal_manager.app.window_role", side_effect=lambda wid: "unique-token" if wid == "0x3" else "unrelated"):
-        app._poll_recovered_window()
-    assert load_shells()[0].window_id == "0x3"
+    from types import SimpleNamespace
+    from terminal_manager import state_db
+    from terminal_manager.recovery_queue import RecoveryQueue
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
+    record = {**entry(1), '_token':'tm-recover-'+'a'*32, '_boot':state_db.boot_id()}
+    windows = [WindowInfo(wid,0,123,0,0,800,600,'gnome-terminal','','task') for wid in ('0x2','0x3')]
+    with patch('terminal_manager.recovery_queue.list_windows',return_value=windows), patch('terminal_manager.recovery_queue.window_role',side_effect=lambda wid: record['_token'] if wid=='0x3' else 'unrelated'), patch('terminal_manager.recovery_queue.launch_tracked') as launch:
+        RecoveryQueue(SimpleNamespace(reason=''))._one(record)
+    assert load_shells()[0].window_id == '0x3'
+    launch.assert_not_called()

@@ -63,6 +63,12 @@ def launch_detached() -> None:
     state_root = Path(env.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     log_path = state_root / "terminal-manager" / "terminal-manager.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    if log_path.exists() and log_path.stat().st_size > 2_000_000:
+        for index in (2, 1):
+            older = log_path.with_suffix(f'.log.{index}')
+            if older.exists():
+                older.replace(log_path.with_suffix(f'.log.{index + 1}'))
+        log_path.replace(log_path.with_suffix('.log.1'))
     with log_path.open("ab") as log_file:
         subprocess.Popen(
             [sys.executable, "-m", "terminal_manager.app"],
