@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
-import subprocess
 import sys
 
 from .model import WindowInfo
+from .tab_worker import MAX_MESSAGE, worker
 
 
 @dataclass(frozen=True)
@@ -43,11 +43,7 @@ def scan_tab_groups(windows: list[WindowInfo]) -> list[TabGroup] | None:
 
 
 def _worker(payload):
-    try:
-        result = subprocess.run([sys.executable, "-m", "terminal_manager.tabs"], input=json.dumps(payload), capture_output=True, text=True, timeout=6)
-        return json.loads(result.stdout) if result.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
+    return worker.request(payload)
 
 
 def _scan_tab_groups_native(windows: list[WindowInfo]) -> list[TabGroup]:
@@ -170,9 +166,8 @@ def _match_window(frame: object, windows: list[WindowInfo], pyatspi: object) -> 
     return best if score(best) < 500 else None
 
 
-def main() -> None:
+def _handle_request(payload):
     from .x11 import list_windows
-    payload = json.load(sys.stdin)
     if "select" in payload:
         # Rescan in the worker: a stale native accessibility object must never
         # be kept in Tk or used after a terminal server has restarted.
@@ -184,7 +179,33 @@ def main() -> None:
     else:
         groups = _scan_tab_groups_native([WindowInfo(**w) for w in payload["windows"]])
         result = [{"window_id": g.window_id, "tabs": [asdict(t) for t in g.tabs]} for g in groups]
-    print(json.dumps(result))
+    return result
+
+
+def main() -> None:
+    # Pump native events even between requests: cached names, selected tabs and
+    # removed applications must stay fresh throughout this process's lifetime.
+    from gi.repository import GLib
+    loop = GLib.MainLoop()
+
+    def receive(_fd, condition):
+        if condition & (GLib.IO_HUP | GLib.IO_ERR):
+            loop.quit()
+            return False
+        line = sys.stdin.buffer.readline(MAX_MESSAGE + 1)
+        if not line or len(line) > MAX_MESSAGE:
+            loop.quit()
+            return False
+        try:
+            response = {"result": _handle_request(json.loads(line))}
+        except Exception as exc:
+            # Tell the parent to open the circuit, retaining the last tab list.
+            response = {"result": None, "error": f"{type(exc).__name__}: {exc}"}
+        print(json.dumps(response), flush=True)
+        return True
+
+    GLib.io_add_watch(sys.stdin.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, receive)
+    loop.run()
 
 
 if __name__ == "__main__":

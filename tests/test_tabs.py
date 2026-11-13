@@ -1,6 +1,5 @@
 from terminal_manager.tabs import TabGroup, TerminalTab, select_tab
-from unittest.mock import Mock, patch
-import subprocess
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from terminal_manager.tabs import _worker, scan_tab_groups
@@ -42,10 +41,8 @@ def test_cached_tab_switch_and_repeat_click() -> None:
     assert selection.calls == 1
 
 
-def test_native_worker_crash_or_timeout_is_contained() -> None:
-    with patch("terminal_manager.tabs.subprocess.run", return_value=Mock(returncode=-11, stdout="")):
-        assert _worker({}) is None
-    with patch("terminal_manager.tabs.subprocess.run", side_effect=subprocess.TimeoutExpired("worker", 6)):
+def test_native_worker_failure_is_contained() -> None:
+    with patch("terminal_manager.tabs.worker.request", return_value=None):
         assert _worker({}) is None
 
 

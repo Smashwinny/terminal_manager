@@ -46,6 +46,7 @@ from .store import (
     state_dir,
 )
 from .tabs import TabGroup, TerminalTab, scan_tab_groups, select_tab
+from .tab_worker import worker as tab_worker
 from .scan_budget import ScanBudget
 from .thermal import HOT_ACCENT, HOT_ROW, ThermalTracker, blend_color, mean_temperature, visual_temperature
 from .tty_probe import probe_visible_tty, terminal_tty_cwds
@@ -219,6 +220,7 @@ class TerminalManagerApp:
 
     def _close(self) -> None:
         self._closed = True
+        tab_worker.close()
         self._probe_generation += 1
         self.recovery_queue.close()
         self.resources.close()
@@ -307,6 +309,7 @@ class TerminalManagerApp:
         menu.add_command(label="暂停自动恢复", command=self.pause_recovery)
         menu.add_command(label="重试失败／继续恢复", command=self.retry_recovery)
         menu.add_command(label="资源状态…", command=self.show_resources)
+        menu.add_command(label="重试标签扫描", command=self.retry_tab_scan)
         menu.add_separator()
         menu.add_command(label="关联 Codex 会话…", command=self.link_codex_session)
         protection_menu.configure(menu=menu)
@@ -914,13 +917,22 @@ class TerminalManagerApp:
         self._recovery_entries = entries
         self.recovery_queue.start(entries)
 
+    def retry_tab_scan(self) -> None:
+        if tab_worker.retry():
+            self._tab_scan_requested = True
+            self._request_tab_scan()
+            self.details.configure(text="已请求标签扫描；正常扫描进程会继续复用。")
+        else:
+            self.details.configure(text="标签扫描尚未结束，请稍后重试。")
+
     def show_resources(self) -> None:
         sample = self.resources.sample
         available = sample.get('available', 0) / 1024**3
         swap = sample.get('swap_used', 0) / 1024**3
         self._notice("资源状态", f"可用内存 {available:.1f} GiB；已用交换空间 {swap:.1f} GiB\n"
                      f"内存等待 {sample.get('memory_some', 0):.1f}%；I/O 全阻塞 {sample.get('io_full', 0):.1f}%\n"
-                     + (self.resources.reason or "资源压力正常") + "\n只暂停新的恢复和重扫描，不停止现有任务。")
+                     + (self.resources.reason or "资源压力正常") + "\n只暂停新的恢复和重扫描，不停止现有任务。"
+                     + "\n标签扫描：" + (tab_worker.error or "常驻进程，按需启动并复用连接"))
 
     def _poll_background(self) -> None:
         if self._closed:
@@ -954,6 +966,8 @@ class TerminalManagerApp:
             self.details.configure(text=self.inventory_writer.error)
         elif self.recovery_queue.active and self.resources.reason:
             self.details.configure(text=self.recovery_queue.message)
+        elif tab_worker.error:
+            self.details.configure(text=f"标签扫描已暂停：{tab_worker.error}。可在任务保护菜单中重试；窗口管理仍可用。")
         self._background_job = self.root.after(100, self._poll_background)
 
     def _probe_async(self, window_id, tab_key):
@@ -1330,7 +1344,8 @@ class TerminalManagerApp:
                 self._tab_scan_result = None
                 self._tab_scan_requested = True
                 self._request_tab_scan()
-                self.details.configure(text="标签列表刚刚发生变化，正在后台刷新；请再点击一次。")
+                self.details.configure(text=(f"标签扫描已暂停：{tab_worker.error}；请使用任务保护 → 重试标签扫描。"
+                                            if tab_worker.error else "标签扫描忙或列表发生变化，正在后台刷新；请再点击一次。"))
                 return
         window_id = window.window_id if window else shell.window_id if shell else ""
         if not window_id:
@@ -1455,7 +1470,7 @@ class TerminalManagerApp:
             self._tab_scan_result = None
 
     def _request_tab_scan(self) -> None:
-        if self.resources.reason or self.recovery_queue.active:
+        if tab_worker.error or self._closed or self.resources.reason or self.recovery_queue.active:
             return
         if self._tab_scan_thread and self._tab_scan_thread.is_alive():
             return

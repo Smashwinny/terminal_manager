@@ -50,6 +50,7 @@ def test_slow_scan_gets_cooldown_instead_of_running_again_immediately():
 
 def test_animated_titles_do_not_trigger_new_accessibility_scans():
     app = object.__new__(TerminalManagerApp)
+    app._closed = False
     app.resources = Mock(reason='')
     app.recovery_queue = Mock(active=False)
     window = WindowInfo("0x2a", 0, 123, 0, 0, 800, 600, "gnome-terminal", "", "spinner 1")
@@ -74,6 +75,7 @@ def test_animated_titles_do_not_trigger_new_accessibility_scans():
 
 def test_switching_known_tab_title_requests_prompt_scan_but_spinners_do_not():
     app = object.__new__(TerminalManagerApp)
+    app._closed = False
     app.resources = Mock(reason='')
     app.recovery_queue = Mock(active=False)
     window = WindowInfo("0x2a", 0, 123, 0, 0, 800, 600, "gnome-terminal", "", "⠋ task A")
